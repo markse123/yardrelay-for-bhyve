@@ -47,6 +47,28 @@ test('metadata renderer updates every platform version target', () => {
   assert.match(rendered.windowsInstaller, /#define AppVersion "0\.2\.0"/);
 });
 
+test('lockfile rendering preserves Windows checkout line endings', () => {
+  const lockfile = `${JSON.stringify({
+    name: canonicalPackage.name,
+    version: canonicalPackage.version,
+    packages: {
+      '': {
+        name: canonicalPackage.name,
+        version: canonicalPackage.version,
+      },
+    },
+  }, null, 2).replaceAll('\n', '\r\n')}\r\n`;
+  const rendered = renderProductMetadata({
+    lockfile,
+    windowsProject: '<Project><TargetFramework>net10.0-windows10.0.22000.0</TargetFramework><AssemblyName>YardRelayApp</AssemblyName><Version>0.2.0</Version></Project>\r\n',
+    windowsManifest: '<assemblyIdentity version="0.2.0.0" name="io.github.markse123.yardrelay"/>\r\n',
+    windowsInstaller: '#define MyAppName "YardRelay"\r\n#define MyAppExeName "YardRelayApp.exe"\r\n#define AppVersion "0.2.0"\r\nAppPublisher=YardRelay contributors\r\nMinVersion=10.0.22000\r\n',
+    macBuild: 'APP_NAME="YardRelay"\r\n<string>io.github.markse123.yardrelay</string>\r\n',
+  }, canonicalPackage);
+
+  assert.equal(rendered.lockfile, lockfile);
+});
+
 test('checked-in platform metadata matches package.json', async () => {
   const result = await syncProductMetadata({ check: true });
   assert.deepEqual(result.changed, []);
