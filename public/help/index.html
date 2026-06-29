@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>YardRelay Help</title>
+    <link rel="stylesheet" href="manual.css?v=20260628">
+    <script src="manual.js?v=20260628" defer></script>
+  </head>
+  <body>
+    <header class="manual-header">
+      <div class="manual-header-inner">
+        <div class="brand-mark" aria-hidden="true">YR</div>
+        <div class="title-block">
+          <p class="eyebrow">YardRelay</p>
+          <h1>Help and user guide</h1>
+          <p class="subtitle">Setup, everyday watering controls, and troubleshooting in one offline guide.</p>
+        </div>
+        <span class="offline-badge">Available offline</span>
+      </div>
+    </header>
+
+    <div class="manual-shell">
+      <aside class="manual-sidebar" aria-label="Help navigation">
+        <div class="search-card">
+          <label for="manualSearch">Search this guide</label>
+          <div class="search-row">
+            <input id="manualSearch" type="search" maxlength="80" autocomplete="off" placeholder="Try “yard run” or “Node.js”">
+            <button id="clearSearch" type="button" hidden>Clear</button>
+          </div>
+          <p id="searchStatus" class="search-status" aria-live="polite">All topics shown</p>
+        </div>
+
+        <nav class="topic-nav">
+          <a href="#getting-started">Getting started</a>
+          <a href="#windows-setup">Windows setup</a>
+          <a href="#macos-setup">macOS setup</a>
+          <a href="#dashboard">Dashboard</a>
+          <a href="#manual-watering">Manual watering</a>
+          <a href="#history">Watering history</a>
+          <a href="#programs">Programs</a>
+          <a href="#yard-runs">Yard runs</a>
+          <a href="#settings">Settings</a>
+          <a href="#desktop-controls">Desktop controls</a>
+          <a href="#troubleshooting">Troubleshooting</a>
+          <a href="#privacy-safety">Privacy and safety</a>
+          <a href="#advanced-setup">Advanced setup</a>
+        </nav>
+
+        <div class="sidebar-actions" data-server-only>
+          <a class="button primary" href="/">Return to controller</a>
+          <a class="button" href="/?tab=settings">Open controller settings</a>
+        </div>
+      </aside>
+
+      <main id="manualContent" class="manual-content">
+        <section class="hero-card" aria-labelledby="guide-intro">
+          <p class="kicker">Start here</p>
+          <h2 id="guide-intro">Your local sprinkler controller</h2>
+          <p>
+            YardRelay runs on your computer and connects to the Orbit B-hyve account you already use.
+            It gives you one place to view controllers and zones, start or stop watering, review history,
+            manage supported program settings, and run configured groups of zones in sequence.
+          </p>
+          <div class="callout warning">
+            <strong>Before watering:</strong> confirm the controller, zone, and run time. A manual start can
+            turn on real irrigation hardware immediately.
+          </div>
+        </section>
+
+        <div id="noResults" class="no-results" hidden>
+          <h2>No matching topics</h2>
+          <p>Try a shorter search such as “setup,” “program,” “history,” or “server.”</p>
+        </div>
+
+        <section id="getting-started" class="topic-card" data-topic data-keywords="quick start first run overview start stop refresh local controller">
+          <p class="section-label">Overview</p>
+          <h2>Getting started</h2>
+          <ol class="steps">
+            <li>
+              <strong>Complete platform setup.</strong>
+              <span>Use the Windows setup screen or the current macOS source-checkout steps below.</span>
+            </li>
+            <li>
+              <strong>Start the controller server.</strong>
+              <span>Desktop apps start it automatically after setup. A source checkout uses <code>npm start</code>.</span>
+            </li>
+            <li>
+              <strong>Wait for a healthy connection.</strong>
+              <span>The top of the dashboard shows controller and Orbit connection status.</span>
+            </li>
+            <li>
+              <strong>Review before changing anything.</strong>
+              <span>Confirm controller names, zones, programs, and current watering before using a write control.</span>
+            </li>
+          </ol>
+          <div class="callout info">
+            The supported deployment is one trusted user on one computer through the loopback interface. It is
+            not designed for LAN or public-internet access.
+          </div>
+          <h3>Current capabilities</h3>
+          <dl class="feature-list compact">
+<!-- BEGIN GENERATED:CAPABILITIES -->
+            <div data-capability="local-dashboard">
+              <dt>Local dashboard</dt>
+              <dd>View controllers, zones, active watering, upcoming schedules, watering history, events, and sanitized logs in one local interface.
+              </dd>
+            </div>
+            <div data-capability="manual-watering">
+              <dt>Manual watering</dt>
+              <dd>Start and stop individual zones with configurable run-time caps and safeguards against conflicting known activity.
+              </dd>
+            </div>
+            <div data-capability="program-controls">
+              <dt>Program controls</dt>
+              <dd>Enable, disable, start, and edit supported fields on existing Orbit programs while keeping smart programs read-only.
+                <ul>
+                  <li>Program changes are snapshotted locally before the Orbit API is updated.</li>
+                </ul>
+              </dd>
+            </div>
+            <div data-capability="yard-runs">
+              <dt>Named yard runs</dt>
+              <dd>Run locally configured groups such as a front yard, garden, or planter sequence one zone at a time.
+                <ul>
+                  <li>Adjust minutes per zone before starting.</li>
+                  <li>Queue additional runs without watering shared zones twice.</li>
+                  <li>Stop the active zone and clear the remaining queue from one control.</li>
+                  <li>Recover the active queue display after a local server restart.</li>
+                </ul>
+              </dd>
+            </div>
+            <div data-capability="write-access-modes">
+              <dt>Local browser write access</dt>
+              <dd>Keep same-computer loopback controls prompt-free or require the app token for every browser.
+                <ul>
+                  <li>The older trusted-network mode remains for private-development compatibility and is not a supported public deployment.</li>
+                </ul>
+              </dd>
+            </div>
+            <div data-capability="desktop-apps">
+              <dt>Optional desktop apps</dt>
+              <dd>Run the same local controller in a macOS SwiftUI wrapper or a Windows WPF and WebView2 wrapper.
+                <ul>
+                  <li>Both wrappers verify the local controller before loading its embedded dashboard.</li>
+                  <li>Windows includes a per-user setup flow with encrypted credential storage and a read-only Orbit login test.</li>
+                </ul>
+              </dd>
+            </div>
+            <div data-capability="offline-help">
+              <dt>Searchable offline Help</dt>
+              <dd>Open the bundled setup, daily-use, privacy, and troubleshooting guide from the dashboard or either desktop wrapper without starting the controller server.
+              </dd>
+            </div>
+<!-- END GENERATED:CAPABILITIES -->
+          </dl>
+        </section>
+
+        <section id="windows-setup" class="topic-card" data-topic data-keywords="windows install installer setup wizard node webview2 orbit email password port import env test login reset">
+          <p class="section-label">Setup</p>
+          <h2>Windows setup</h2>
+          <p>The Windows app opens Desktop setup automatically when required settings or credentials are missing.</p>
+
+          <h3>1. Check prerequisites</h3>
+          <ul>
+            <li>Windows 11 on an x64 computer.</li>
+            <li>Node.js 24 or newer.</li>
+            <li>Microsoft Edge WebView2 Runtime.</li>
+          </ul>
+          <p class="link-row">
+            <a href="https://nodejs.org/en/download" target="_blank" rel="noopener noreferrer">Download Node.js</a>
+            <a href="https://developer.microsoft.com/en-us/microsoft-edge/webview2/" target="_blank" rel="noopener noreferrer">Download WebView2</a>
+          </p>
+
+          <h3>2. Enter account and server settings</h3>
+          <ul>
+            <li>Enter the email address and password for your Orbit B-hyve account.</li>
+            <li>Keep port <code>3030</code> unless another local app already uses it.</li>
+            <li>Leave Node path empty when the app detects a suitable Node.js installation.</li>
+          </ul>
+
+          <h3>3. Test and save</h3>
+          <ol>
+            <li>Select <strong>Test Orbit Login</strong>. The test reads account metadata and does not start watering or change programs.</li>
+            <li>Optionally import an existing <code>.env</code> file or yard-run configuration when migrating from a source checkout.</li>
+            <li>Select <strong>Save and start</strong>.</li>
+          </ol>
+          <div class="callout note">
+            A failed login test does not always mean the credentials are wrong. Orbit or the internet connection
+            may be temporarily unavailable. You can save and retry later.
+          </div>
+        </section>
+
+        <section id="macos-setup" class="topic-card" data-topic data-keywords="mac macos setup source checkout env swift build node terminal application wrapper">
+          <p class="section-label">Setup</p>
+          <h2>macOS setup</h2>
+          <p>
+            The current macOS wrapper uses the source-checkout configuration flow. It does not yet have the
+            Windows-style first-run setup wizard.
+          </p>
+          <ol class="steps">
+            <li>
+              <strong>Install Node.js 24 or newer.</strong>
+              <span>Confirm it is available by running <code>node --version</code> in Terminal.</span>
+            </li>
+            <li>
+              <strong>Install project dependencies.</strong>
+              <span>From the project folder, run <code>npm ci</code>.</span>
+            </li>
+            <li>
+              <strong>Create local configuration.</strong>
+              <span>Copy <code>.env.example</code> to <code>.env</code>, then add your Orbit email, password, and a long random app token.</span>
+            </li>
+            <li>
+              <strong>Build or run the wrapper.</strong>
+              <span>Run <code>swift build --package-path mac/BHyveControllerApp</code>, or use the app-bundle build script described in the project README.</span>
+            </li>
+          </ol>
+          <div class="callout warning">
+            Keep <code>.env</code> private. Never attach it to an issue, include it in a screenshot, or commit it to Git.
+          </div>
+        </section>
+
+        <section id="dashboard" class="topic-card" data-topic data-keywords="dashboard controller devices zones status refresh schedule active watering connection">
+          <p class="section-label">Daily use</p>
+          <h2>Dashboard</h2>
+          <dl class="feature-list">
+            <div>
+              <dt>Connection status</dt>
+              <dd>Shows whether the local server is reachable, Orbit authentication succeeded, and the live event stream is connected.</dd>
+            </div>
+            <div>
+              <dt>Active watering</dt>
+              <dd>Appears when a zone is running and shows the current zone, remaining time, and a Stop control.</dd>
+            </div>
+            <div>
+              <dt>Upcoming schedule</dt>
+              <dd>Summarizes scheduled watering expected during the next 48 hours. Expand it to review more entries.</dd>
+            </div>
+            <div>
+              <dt>Controller cards</dt>
+              <dd>Show controller mode, rain delay, zones, and manual watering controls.</dd>
+            </div>
+            <div>
+              <dt>Refresh</dt>
+              <dd>Requests current data from Orbit. Refreshing does not start or stop watering.</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section id="manual-watering" class="topic-card" data-topic data-keywords="manual watering start stop zone minutes run cap active overlap">
+          <p class="section-label">Daily use</p>
+          <h2>Manual watering</h2>
+          <h3>Start a zone</h3>
+          <ol>
+            <li>On Dashboard, find the correct controller and zone.</li>
+            <li>Enter the number of minutes. The value must be within the manual run cap set under Settings.</li>
+            <li>Select <strong>Start</strong> and confirm the zone begins reporting as active.</li>
+          </ol>
+          <h3>Stop a zone</h3>
+          <p>
+            Use <strong>Stop</strong> in the Active watering panel or beside the active zone. Wait for the dashboard
+            to report that watering ended. If the status does not update, select Refresh before trying another start.
+          </p>
+          <div class="callout warning">
+            The controller blocks conflicting manual starts when it knows another zone is active. Always verify the
+            physical sprinkler state if the network connection is interrupted.
+          </div>
+        </section>
+
+        <section id="history" class="topic-card" data-topic data-keywords="history calendar watering past events duration 24 72 184 hours refresh details">
+          <p class="section-label">Daily use</p>
+          <h2>Watering history</h2>
+          <p>
+            History reads recent watering activity from Orbit and organizes it by day, controller, zone, and duration.
+            Choose a 24-, 72-, or 184-hour window, or enter another supported number of hours.
+          </p>
+          <ul>
+            <li>Select a day in the calendar to view its events.</li>
+            <li>Use Show details to expand the event panel.</li>
+            <li>Select Refresh when recent watering is not yet visible.</li>
+          </ul>
+          <div class="callout note">
+            Orbit history can arrive later than live controller status. A missing recent event does not by itself mean
+            the watering action failed.
+          </div>
+        </section>
+
+        <section id="programs" class="topic-card" data-topic data-keywords="programs schedule enable disable start now edit budget frequency start times snapshots smart read only">
+          <p class="section-label">Programs</p>
+          <h2>Programs</h2>
+          <p>The Programs tab works with programs that already exist in Orbit.</p>
+          <ul>
+            <li><strong>Enable or Disable</strong> changes whether a supported program runs on schedule.</li>
+            <li><strong>Start now</strong> immediately starts a supported non-smart program.</li>
+            <li><strong>Edit schedule</strong> changes supported fields such as budget, frequency, and start times.</li>
+            <li>Smart programs are shown read-only.</li>
+          </ul>
+          <div class="callout info">
+            Before a program update is sent to Orbit, the local server saves a snapshot under its data folder. The app
+            does not currently create or delete Orbit programs.
+          </div>
+        </section>
+
+        <section id="yard-runs" class="topic-card" data-topic data-keywords="yard runs front back garden planters sequence queue now next zones recipe config stop minutes dedupe">
+          <p class="section-label">Programs</p>
+          <h2>Yard runs</h2>
+          <p>
+            A yard run is a locally configured sequence of zones, such as a front yard, garden, or planter group.
+            Yard runs appear only when a local recipe file defines them.
+          </p>
+          <ol>
+            <li>Open Programs and find the yard-run controls.</li>
+            <li>Review the run name, zones, and minutes per zone.</li>
+            <li>Select the watering button. The server runs one zone at a time and shows Now and Next.</li>
+            <li>Select <strong>Stop yard run</strong> to stop the current zone and clear the remaining queue.</li>
+          </ol>
+          <ul>
+            <li>Adding another run while one is active appends its unique zones to the queue.</li>
+            <li>Shared zones are deduplicated so they are not watered twice in the same queue.</li>
+            <li>The local server saves active queue state so the display can recover after a restart.</li>
+          </ul>
+          <div class="callout warning">
+            Yard-run recipes describe a specific property and may contain private controller identifiers. Keep the local
+            recipe file out of Git, screenshots, support posts, and release packages.
+          </div>
+        </section>
+
+        <section id="settings" class="topic-card" data-topic data-keywords="settings manual run cap access writes token local protected trusted network">
+          <p class="section-label">Configuration</p>
+          <h2>Controller settings</h2>
+          <p>
+            The Settings tab inside the dashboard controls browser-level behavior. The desktop Settings button on Windows
+            opens account, port, Node.js, import, diagnostics, and reset options.
+          </p>
+          <dl class="feature-list">
+            <div>
+              <dt>Manual run cap</dt>
+              <dd>Sets the largest manual zone or yard-run duration the dashboard will accept, from 0 to 120 minutes. Set it to 0 to disable manual starts in the browser.</dd>
+            </div>
+            <div>
+              <dt>Access and writes</dt>
+              <dd>Explains that the controller is local and that program changes are snapshotted before Orbit is updated.</dd>
+            </div>
+          </dl>
+          <p data-server-only><a class="inline-action" href="/?tab=settings">Open controller settings</a></p>
+        </section>
+
+        <section id="desktop-controls" class="topic-card" data-topic data-keywords="desktop start stop restart reload config settings help updates copy diagnostics app data reset setup">
+          <p class="section-label">Desktop app</p>
+          <h2>Desktop controls</h2>
+          <dl class="feature-list">
+            <div>
+              <dt>Start</dt>
+              <dd>Starts a controller server managed by the desktop app.</dd>
+            </div>
+            <div>
+              <dt>Stop</dt>
+              <dd>Stops this controller after verifying its local service identity. It does not scan for or kill unrelated Node.js processes.</dd>
+            </div>
+            <div>
+              <dt>Restart</dt>
+              <dd>Stops and starts the controller, useful after settings or local files change.</dd>
+            </div>
+            <div>
+              <dt>Reload</dt>
+              <dd>Reloads the embedded dashboard without restarting the server.</dd>
+            </div>
+            <div>
+              <dt>Settings / Config</dt>
+              <dd>Windows exposes setup settings and the per-user configuration folder. macOS currently uses the source-checkout configuration.</dd>
+            </div>
+            <div>
+              <dt>Release checks</dt>
+              <dd>Remain disabled until the separate private release repository exists and has been verified. The app does not silently download or install updates.</dd>
+            </div>
+          </dl>
+          <p class="link-row">
+<!-- BEGIN GENERATED:RELEASE-LINK -->
+            <span>Release checks will be enabled after the private release repository is created and verified.</span>
+<!-- END GENERATED:RELEASE-LINK -->
+          </p>
+        </section>
+
+        <section id="troubleshooting" class="topic-card" data-topic data-keywords="troubleshooting error server stopped node missing webview port occupied orbit login disconnected locked writes yard runs missing history unavailable diagnostics logs">
+          <p class="section-label">Recovery</p>
+          <h2>Troubleshooting</h2>
+
+          <details open>
+            <summary>The controller server will not start</summary>
+            <ul>
+              <li>Confirm Node.js 24 or newer is installed and detected.</li>
+              <li>Check whether another app is using the configured port. Try another port between 1024 and 65535.</li>
+              <li>On Windows, open Settings and use Copy diagnostics. Diagnostics omit credentials and tokens.</li>
+              <li>Review the wrapper message and sanitized local logs for the first reported error.</li>
+            </ul>
+          </details>
+
+          <details>
+            <summary>Windows reports that WebView2 is unavailable</summary>
+            <p>
+              Install or repair Microsoft Edge WebView2 Runtime, close the controller app, and open it again.
+              <a href="https://developer.microsoft.com/en-us/microsoft-edge/webview2/" target="_blank" rel="noopener noreferrer">Open the official WebView2 download page</a>.
+            </p>
+          </details>
+
+          <details>
+            <summary>Orbit login fails or the dashboard stays disconnected</summary>
+            <ul>
+              <li>Confirm the computer has internet access and Orbit services are reachable.</li>
+              <li>Re-enter the same email and password used by the official B-hyve account.</li>
+              <li>Use Test Orbit Login on Windows. The test is read-only.</li>
+              <li>If credentials recently changed, restart the controller after saving them.</li>
+            </ul>
+          </details>
+
+          <details>
+            <summary>Write controls are locked in a normal browser</summary>
+            <p>
+              Select <strong>Unlock writes</strong> and enter the local <code>APP_TOKEN</code>. Native wrappers unlock their
+              verified embedded dashboard automatically. Never share the token or put it in a URL query string.
+            </p>
+          </details>
+
+          <details>
+            <summary>Yard-run controls are missing</summary>
+            <p>
+              Yard runs are optional. Import or create a valid local yard-run recipe, then restart the server. Basic
+              controllers, zones, and Orbit programs work without a yard-run file.
+            </p>
+          </details>
+
+          <details>
+            <summary>History or live status looks stale</summary>
+            <p>
+              Select Refresh and wait for the connection badges to recover. History may lag behind live status. If the
+              network was interrupted, verify the physical sprinkler state before issuing another command.
+            </p>
+          </details>
+
+          <details>
+            <summary>I need to reset Windows setup</summary>
+            <p>
+              Open Settings, select <strong>Reset setup</strong>, and confirm. This stops the managed server and removes
+              saved desktop settings and encrypted credentials for the current Windows user. Yard-run configuration,
+              snapshots, logs, and active-run data are kept.
+            </p>
+          </details>
+        </section>
+
+        <section id="privacy-safety" class="topic-card" data-topic data-keywords="privacy safety credentials token email password device ids property local network internet logs screenshots backups">
+          <p class="section-label">Important</p>
+          <h2>Privacy and safety</h2>
+          <ul class="check-list">
+            <li>Keep the controller bound to loopback unless you have deliberately configured and secured private-network access.</li>
+            <li>Never expose the Node server directly to the public internet.</li>
+            <li>Keep Orbit credentials and <code>APP_TOKEN</code> out of Git, screenshots, issue reports, and chat messages.</li>
+            <li>Do not publish device identifiers, property-specific zone names, schedules, logs, or yard-run recipes.</li>
+            <li>Use Copy diagnostics when available; it is designed to omit credentials, tokens, email addresses, device identifiers, and raw request data.</li>
+            <li>Verify the real sprinkler state after connection failures, restarts, or unexpected controller behavior.</li>
+          </ul>
+        </section>
+
+        <section id="advanced-setup" class="topic-card" data-topic data-keywords="advanced source checkout files env data config logs app token host port bhyve data dir yard run config npm diagnostics updates">
+          <p class="section-label">Advanced</p>
+          <h2>Source checkout and local files</h2>
+          <p>For source-checkout use, install dependencies with <code>npm ci</code>, configure <code>.env</code>, and run <code>npm start</code>.</p>
+
+          <h3>Common environment settings</h3>
+          <dl class="feature-list compact">
+            <div><dt><code>ORBIT_EMAIL</code> / <code>ORBIT_PASSWORD</code></dt><dd>Orbit account credentials. Keep them backend-only.</dd></div>
+            <div><dt><code>HOST</code></dt><dd>Use <code>127.0.0.1</code> for the default local-only deployment.</dd></div>
+            <div><dt><code>PORT</code></dt><dd>Local controller port, normally <code>3030</code>.</dd></div>
+            <div><dt><code>APP_TOKEN</code></dt><dd>A long random local token required for protected browser writes and desktop service verification.</dd></div>
+            <div><dt><code>BHYVE_DATA_DIR</code></dt><dd>Optional desktop path for snapshots and active yard-run state.</dd></div>
+            <div><dt><code>YARD_RUN_CONFIG</code></dt><dd>Optional path to the local property-specific yard-run recipe.</dd></div>
+          </dl>
+
+          <h3>Where desktop data lives</h3>
+          <ul>
+            <li><strong>Windows private-development builds:</strong> settings, config, data, and logs currently remain under the legacy <code>%LOCALAPPDATA%\BHyveController</code> path. Public builds will migrate to <code>%LOCALAPPDATA%\YardRelay</code> only after migration tests are complete. Secrets are encrypted for the current Windows user.</li>
+            <li><strong>macOS today:</strong> the wrapper reads the source checkout and its private <code>.env</code>. Native Keychain and Application Support parity is planned separately.</li>
+          </ul>
+
+          <div class="callout info">
+            This guide is bundled with the installed app version. Check the release page for a newer app and manual;
+            the app does not silently replace its own binaries.
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

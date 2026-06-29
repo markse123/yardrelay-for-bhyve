@@ -1,0 +1,118 @@
+<Window x:Class="BHyveControllerApp.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="YardRelay"
+        Width="1120"
+        Height="780"
+        MinWidth="980"
+        MinHeight="680"
+        Background="#101010"
+        Foreground="#f5f5f5">
+  <DockPanel LastChildFill="True">
+    <Border DockPanel.Dock="Top" Background="#2e2e2e" BorderBrush="#444444" BorderThickness="0,0,0,1" Padding="14">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <StackPanel>
+          <TextBlock Text="YardRelay" FontSize="18" FontWeight="SemiBold" />
+          <TextBlock x:Name="StatusText" Text="Starting..." Foreground="#b8b8b8" Margin="0,3,0,0" />
+        </StackPanel>
+        <WrapPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center">
+          <Button x:Name="StartButton" Content="Start" Click="StartButton_Click" Margin="4,0" MinWidth="74" />
+          <Button x:Name="StopButton" Content="Stop" Click="StopButton_Click" Margin="4,0" MinWidth="74" />
+          <Button x:Name="RestartButton" Content="Restart" Click="RestartButton_Click" Margin="4,0" MinWidth="82" />
+          <Button x:Name="ReloadButton" Content="Reload" Click="ReloadButton_Click" Margin="4,0" MinWidth="74" />
+          <Button Content="Config" Click="OpenConfigButton_Click" Margin="4,0" MinWidth="74" />
+          <Button Content="Settings" Click="SettingsButton_Click" Margin="4,0" MinWidth="82" />
+          <Button Content="Help" Click="HelpButton_Click" Margin="4,0" MinWidth="74" />
+        </WrapPanel>
+      </Grid>
+    </Border>
+
+    <Grid>
+      <Grid x:Name="ControllerPanel">
+        <wv2:WebView2 x:Name="ControllerWebView" DefaultBackgroundColor="#101010" />
+      </Grid>
+
+      <Border x:Name="SetupPanel" Background="#101010" Padding="28" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel MaxWidth="760">
+            <TextBlock Text="Desktop setup" FontSize="24" FontWeight="SemiBold" Margin="0,0,0,8" />
+            <TextBlock Text="Configure local credentials and runtime paths for this Windows user." Foreground="#b8b8b8" Margin="0,0,0,20" />
+
+            <Border BorderBrush="#444444" BorderThickness="1" CornerRadius="6" Padding="16" Margin="0,0,0,14">
+              <StackPanel>
+                <TextBlock Text="Prerequisites" FontWeight="SemiBold" Margin="0,0,0,10" />
+                <TextBlock x:Name="NodeStatusText" Text="Node.js status unknown" Foreground="#b8b8b8" Margin="0,0,0,8" />
+                <StackPanel Orientation="Horizontal">
+                  <Button Content="Download Node.js" Click="DownloadNodeButton_Click" Margin="0,0,8,0" />
+                  <Button Content="Download WebView2" Click="DownloadWebViewButton_Click" />
+                </StackPanel>
+              </StackPanel>
+            </Border>
+
+            <Grid Margin="0,0,0,14">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="180" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+              </Grid.RowDefinitions>
+
+              <TextBlock Grid.Row="0" Grid.Column="0" Text="Orbit email" VerticalAlignment="Center" Margin="0,0,12,10" />
+              <TextBox x:Name="EmailBox" Grid.Row="0" Grid.Column="1" Margin="0,0,0,10" />
+
+              <TextBlock Grid.Row="1" Grid.Column="0" Text="Orbit password" VerticalAlignment="Center" Margin="0,0,12,10" />
+              <PasswordBox x:Name="PasswordBox" Grid.Row="1" Grid.Column="1" Margin="0,0,0,10" />
+
+              <TextBlock Grid.Row="2" Grid.Column="0" Text="Port" VerticalAlignment="Center" Margin="0,0,12,10" />
+              <TextBox x:Name="PortBox" Grid.Row="2" Grid.Column="1" Width="120" HorizontalAlignment="Left" Margin="0,0,0,10" />
+
+              <TextBlock Grid.Row="3" Grid.Column="0" Text="Node path" VerticalAlignment="Center" Margin="0,0,12,0" />
+              <DockPanel Grid.Row="3" Grid.Column="1">
+                <Button DockPanel.Dock="Right" Content="Browse" Click="BrowseNodeButton_Click" Margin="8,0,0,0" />
+                <TextBox x:Name="NodePathBox" />
+              </DockPanel>
+            </Grid>
+
+            <Border BorderBrush="#444444" BorderThickness="1" CornerRadius="6" Padding="16" Margin="0,0,0,14">
+              <StackPanel>
+                <CheckBox x:Name="RequireWriteTokenBox"
+                          Content="Require the app token to unlock browser controls"
+                          FontWeight="SemiBold" />
+                <TextBlock Text="Extra security for shared computers. Leave off for prompt-free controls on this computer."
+                           Foreground="#b8b8b8"
+                           TextWrapping="Wrap"
+                           Margin="22,6,0,0" />
+              </StackPanel>
+            </Border>
+
+            <WrapPanel Margin="0,0,0,14">
+              <Button Content="Test Orbit Login" Click="TestLoginButton_Click" Margin="0,0,8,8" />
+              <Button Content="Import .env" Click="ImportEnvButton_Click" Margin="0,0,8,8" />
+              <Button Content="Import yard-run config" Click="ImportYardRunButton_Click" Margin="0,0,8,8" />
+              <Button Content="Open app data" Click="OpenDataButton_Click" Margin="0,0,8,8" />
+              <Button Content="Reset setup" Click="ResetSetupButton_Click" Margin="0,0,8,8" />
+              <Button Content="Copy diagnostics" Click="CopyDiagnosticsButton_Click" Margin="0,0,8,8" />
+              <Button Content="Help and user guide" Click="HelpButton_Click" Margin="0,0,8,8" />
+            </WrapPanel>
+
+            <TextBlock x:Name="SetupMessageText" Text="" Foreground="#b8b8b8" TextWrapping="Wrap" Margin="0,0,0,18" />
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+              <Button Content="Cancel" Click="CancelSetupButton_Click" Margin="0,0,8,0" />
+              <Button Content="Save and start" Click="SaveSetupButton_Click" FontWeight="SemiBold" />
+            </StackPanel>
+          </StackPanel>
+        </ScrollViewer>
+      </Border>
+    </Grid>
+  </DockPanel>
+</Window>
