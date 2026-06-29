@@ -77,6 +77,7 @@ function validatePlatformIdentity(sources) {
 }
 
 function renderLockfile(source, packageJson) {
+  const newline = source.includes('\r\n') ? '\r\n' : '\n';
   const lockfile = JSON.parse(source);
   assertPlainObject(lockfile, 'package-lock.json');
   assertPlainObject(lockfile.packages, 'package-lock.json packages');
@@ -85,7 +86,7 @@ function renderLockfile(source, packageJson) {
   lockfile.version = packageJson.version;
   lockfile.packages[''].name = packageJson.name;
   lockfile.packages[''].version = packageJson.version;
-  return `${JSON.stringify(lockfile, null, 2)}\n`;
+  return `${JSON.stringify(lockfile, null, 2).replaceAll('\n', newline)}${newline}`;
 }
 
 export function renderProductMetadata(sources, packageJson) {
