@@ -1,0 +1,25 @@
+{
+  "name": "yardrelay-for-bhyve",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/markse123/yardrelay-for-bhyve.git"
+  },
+  "scripts": {
+    "start": "node server/app.js",
+    "dev": "node server/app.js",
+    "docs:update": "node scripts/update-project-docs.mjs",
+    "docs:check": "node scripts/update-project-docs.mjs --check",
+    "metadata:update": "node scripts/sync-product-metadata.mjs",
+    "metadata:check": "node scripts/sync-product-metadata.mjs --check",
+    "pretest": "npm run metadata:update && npm run docs:update",
+    "check": "node --check server/app.js && node --check server/orbit-client.js && node --check server/runtime-config.js && node --check server/security.js && node --check server/service-identity.js && node --check server/sse-clients.js && node --check server/yard-run-config.js && node --check server/yard-run-state.js && node --check public/app.js && node --check public/help/manual.js && node --check scripts/privacy-scan.js && node --check scripts/sync-product-metadata.mjs && node --check scripts/update-project-docs.mjs && node --check scripts/validate-orbit-login.mjs",
+    "privacy:scan": "node scripts/privacy-scan.js",
+    "test": "npm run check && node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

@@ -1,0 +1,192 @@
+{
+  "schemaVersion": 1,
+  "releaseLinksEnabled": false,
+  "accountRequirement": "Orbit B-hyve account credentials.",
+  "capabilities": [
+    {
+      "id": "local-dashboard",
+      "title": "Local dashboard",
+      "summary": "View controllers, zones, active watering, upcoming schedules, watering history, events, and sanitized logs in one local interface.",
+      "details": [],
+      "evidence": [
+        "public/index.html",
+        "public/app.js",
+        "server/app.js"
+      ]
+    },
+    {
+      "id": "manual-watering",
+      "title": "Manual watering",
+      "summary": "Start and stop individual zones with configurable run-time caps and safeguards against conflicting known activity.",
+      "details": [],
+      "evidence": [
+        "public/app.js",
+        "server/app.js"
+      ]
+    },
+    {
+      "id": "program-controls",
+      "title": "Program controls",
+      "summary": "Enable, disable, start, and edit supported fields on existing Orbit programs while keeping smart programs read-only.",
+      "details": [
+        "Program changes are snapshotted locally before the Orbit API is updated."
+      ],
+      "evidence": [
+        "public/app.js",
+        "server/app.js"
+      ]
+    },
+    {
+      "id": "yard-runs",
+      "title": "Named yard runs",
+      "summary": "Run locally configured groups such as a front yard, garden, or planter sequence one zone at a time.",
+      "details": [
+        "Adjust minutes per zone before starting.",
+        "Queue additional runs without watering shared zones twice.",
+        "Stop the active zone and clear the remaining queue from one control.",
+        "Recover the active queue display after a local server restart."
+      ],
+      "evidence": [
+        "config/yard-runs.example.json",
+        "public/app.js",
+        "server/app.js",
+        "server/yard-run-state.js"
+      ]
+    },
+    {
+      "id": "write-access-modes",
+      "title": "Local browser write access",
+      "summary": "Keep same-computer loopback controls prompt-free or require the app token for every browser.",
+      "details": [
+        "The older trusted-network mode remains for private-development compatibility and is not a supported public deployment."
+      ],
+      "evidence": [
+        ".env.example",
+        "public/app.js",
+        "server/security.js"
+      ]
+    },
+    {
+      "id": "desktop-apps",
+      "title": "Optional desktop apps",
+      "summary": "Run the same local controller in a macOS SwiftUI wrapper or a Windows WPF and WebView2 wrapper.",
+      "details": [
+        "Both wrappers verify the local controller before loading its embedded dashboard.",
+        "Windows includes a per-user setup flow with encrypted credential storage and a read-only Orbit login test."
+      ],
+      "evidence": [
+        "docs/desktop-setup.md",
+        "mac/BHyveControllerApp/Package.swift",
+        "windows/BHyveControllerApp/BHyveControllerApp.csproj"
+      ]
+    },
+    {
+      "id": "offline-help",
+      "title": "Searchable offline Help",
+      "summary": "Open the bundled setup, daily-use, privacy, and troubleshooting guide from the dashboard or either desktop wrapper without starting the controller server.",
+      "details": [],
+      "evidence": [
+        "public/help/index.html",
+        "mac/BHyveControllerApp/Sources/BHyveControllerApp/BHyveControllerApp.swift",
+        "windows/BHyveControllerApp/HelpWindow.xaml.cs"
+      ]
+    }
+  ],
+  "developmentCommands": [
+    {
+      "id": "install",
+      "label": "Install dependencies from the lockfile",
+      "command": "npm ci",
+      "language": "bash",
+      "evidence": [
+        "package-lock.json"
+      ]
+    },
+    {
+      "id": "start",
+      "label": "Start the local controller",
+      "command": "npm start",
+      "language": "bash",
+      "npmScript": "start",
+      "evidence": []
+    },
+    {
+      "id": "test",
+      "label": "Regenerate project documentation and run all checks",
+      "command": "npm test",
+      "language": "bash",
+      "npmScript": "test",
+      "evidence": []
+    },
+    {
+      "id": "docs-update",
+      "label": "Regenerate the README and shared Help capability summary without running tests",
+      "command": "npm run docs:update",
+      "language": "bash",
+      "npmScript": "docs:update",
+      "evidence": []
+    },
+    {
+      "id": "docs-check",
+      "label": "Check generated documentation for drift without changing files",
+      "command": "npm run docs:check",
+      "language": "bash",
+      "npmScript": "docs:check",
+      "evidence": []
+    },
+    {
+      "id": "metadata-check",
+      "label": "Check canonical package identity and platform versions for drift",
+      "command": "npm run metadata:check",
+      "language": "bash",
+      "npmScript": "metadata:check",
+      "evidence": []
+    },
+    {
+      "id": "privacy-scan",
+      "label": "Scan tracked and untracked repository files for private data",
+      "command": "npm run privacy:scan",
+      "language": "bash",
+      "npmScript": "privacy:scan",
+      "evidence": []
+    },
+    {
+      "id": "dependency-audit",
+      "label": "Audit production dependencies for high-severity vulnerabilities",
+      "command": "npm audit --audit-level=high",
+      "language": "bash",
+      "evidence": [
+        "package-lock.json"
+      ]
+    }
+  ],
+  "wrapperBuildCommands": [
+    {
+      "id": "mac-build",
+      "label": "Build the optional macOS wrapper",
+      "command": "swift build --package-path mac/BHyveControllerApp",
+      "language": "bash",
+      "evidence": [
+        "mac/BHyveControllerApp/Package.swift"
+      ]
+    },
+    {
+      "id": "windows-build",
+      "label": "Build the optional Windows wrapper",
+      "command": "dotnet build windows/BHyveControllerApp/BHyveControllerApp.csproj -c Release",
+      "language": "powershell",
+      "evidence": [
+        "windows/BHyveControllerApp/BHyveControllerApp.csproj"
+      ]
+    },
+    {
+      "id": "windows-package",
+      "label": "Create the self-contained Windows package",
+      "command": "./windows/package-windows.ps1 -Runtime win-x64",
+      "language": "powershell",
+      "evidence": [
+        "windows/package-windows.ps1"
+      ]
+    }
+  ]
+}

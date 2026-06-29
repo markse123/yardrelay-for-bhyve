@@ -1,0 +1,13 @@
+.env
+config/yard-runs.local.json
+data/
+work/
+node_modules/
+.DS_Store
+mac/BHyveControllerApp/.build/
+mac/BHyveControllerApp/.swiftpm/
+windows/BHyveControllerApp/bin/
+windows/BHyveControllerApp/obj/
+test/**/bin/
+test/**/obj/
+outputs/

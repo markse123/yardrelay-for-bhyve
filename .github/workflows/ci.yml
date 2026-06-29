@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check generated documentation
+        run: npm run docs:check
+
+      - name: Check product metadata
+        run: npm run metadata:check
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run privacy scan
+        run: npm run privacy:scan
+
+      - name: Audit production dependency tree
+        run: npm audit --audit-level=high
+
+  mac-wrapper:
+    name: Mac Wrapper
+    runs-on: macos-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+
+      - name: Build macOS app bundle
+        run: mac/BHyveControllerApp/scripts/build-app.sh
+
+      - name: Validate macOS bundle metadata
+        run: plutil -lint "mac/BHyveControllerApp/.build/app/YardRelay.app/Contents/Info.plist"
+
+  windows-wrapper:
+    name: Windows Wrapper
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Test Windows controller identity
+        run: dotnet run --project test/WindowsServerControllerHarness/WindowsServerControllerHarness.csproj
+
+      - name: Build Windows package
+        shell: pwsh
+        run: ./windows/package-windows.ps1 -Runtime win-x64

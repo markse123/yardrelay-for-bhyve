@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>YardRelay</title>
+    <link rel="stylesheet" href="/styles.css?v=20260623-yard-runs">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="signal-tile" aria-hidden="true">
+          <span class="wifi-mark"></span>
+        </div>
+        <div class="brand-stack">
+          <p class="eyebrow">Unofficial local controller for Orbit B-hyve devices</p>
+          <h1 class="brand-logo">Yard<span>Relay</span></h1>
+        </div>
+        <div class="status-strip">
+          <span id="connectionBadge" class="badge">Starting</span>
+          <span id="refreshStamp" class="muted">No refresh yet</span>
+          <button id="unlockButton" class="secondary" type="button" hidden>Unlock writes</button>
+          <button id="refreshButton" class="secondary">Refresh</button>
+        </div>
+      </header>
+
+      <nav class="tabs" aria-label="Controller sections">
+        <button class="tab is-active" data-tab="dashboard">Dashboard</button>
+        <button class="tab" data-tab="history">History</button>
+        <button class="tab" data-tab="programs">Programs</button>
+        <button class="tab" data-tab="events">Events</button>
+        <button class="tab" data-tab="logs">Logging</button>
+        <button class="tab" data-tab="settings">Settings</button>
+        <a class="tab tab-link" href="/help/index.html">Help</a>
+      </nav>
+
+      <main>
+        <section id="dashboardTab" class="tab-panel">
+          <div id="summaryGrid" class="summary-grid"></div>
+          <section id="activeZonesView" class="active-zones" aria-live="polite" hidden></section>
+          <section id="upcomingSchedule" class="upcoming-schedule" aria-live="polite"></section>
+          <div id="devicesGrid" class="device-grid"></div>
+        </section>
+
+        <section id="historyTab" class="tab-panel" hidden>
+          <section class="history-panel" aria-live="polite">
+            <div class="history-head">
+              <div>
+                <h2>Watering history</h2>
+                <p id="historyRangeLabel" class="muted">Last 184 hours</p>
+              </div>
+              <div class="history-controls">
+                <label class="history-hours">
+                  <span>Last</span>
+                  <input id="historyHours" class="number-input" type="number" min="1" max="184" step="1" value="184" aria-label="History lookback hours">
+                  <span>hours</span>
+                </label>
+                <div class="button-row">
+                  <button class="secondary" data-history-hours="24">24h</button>
+                  <button class="secondary" data-history-hours="72">72h</button>
+                  <button class="secondary" data-history-hours="184">184h</button>
+                  <button id="historyRefreshButton" class="secondary">Refresh</button>
+                </div>
+              </div>
+            </div>
+            <div id="historyContent" class="history-content">
+              <div class="empty-state compact">
+                <h3>Loading history</h3>
+                <p>Checking Orbit watering history.</p>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section id="programsTab" class="tab-panel" hidden>
+          <div class="section-heading">
+            <div>
+              <h2>Programs</h2>
+              <p>Existing B-hyve programs only. Smart programs are read-only.</p>
+            </div>
+          </div>
+          <section id="yardRunPanel" class="yard-run-panel" aria-live="polite"></section>
+          <div id="programsGrid" class="program-grid"></div>
+        </section>
+
+        <section id="eventsTab" class="tab-panel" hidden>
+          <div class="section-heading">
+            <div>
+              <h2>Events</h2>
+              <p>Recent local actions and Orbit stream messages.</p>
+            </div>
+          </div>
+          <div id="eventsList" class="events-list"></div>
+        </section>
+
+        <section id="logsTab" class="tab-panel" hidden>
+          <div class="section-heading">
+            <div>
+              <h2>Logging</h2>
+              <p>Sanitized local API, Orbit REST, and websocket traffic.</p>
+            </div>
+            <div class="logs-toolbar">
+              <span id="logCount" class="badge">0 entries</span>
+              <select id="logFilter" class="select-input compact" aria-label="Log filter">
+                <option value="all">All traffic</option>
+                <option value="local">Local API</option>
+                <option value="orbit">Orbit</option>
+                <option value="websocket">Websocket</option>
+                <option value="error">Errors</option>
+              </select>
+            </div>
+          </div>
+          <div id="logsList" class="logs-list"></div>
+        </section>
+
+        <section id="settingsTab" class="tab-panel" hidden>
+          <div class="settings-panel">
+            <h2>Settings</h2>
+            <dl>
+              <div>
+                <dt>Access</dt>
+                <dd>The server binds to 127.0.0.1 by default; Host and Origin checks guard any explicitly configured network access.</dd>
+              </div>
+              <div>
+                <dt>Writes</dt>
+                <dd>Program updates save snapshots before the Orbit API is changed.</dd>
+              </div>
+              <div>
+                <dt>Control security</dt>
+                <dd id="writeAccessMode">Loading write-access mode.</dd>
+              </div>
+              <div>
+                <dt>Manual run cap</dt>
+                <dd>
+                  <label class="settings-number-field">
+                    <input id="manualCap" class="number-input" type="number" min="0" max="120" step="1" value="60" aria-label="Manual run cap minutes">
+                    <span>minutes.</span>
+                  </label>
+                </dd>
+              </div>
+            </dl>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <template id="emptyTemplate">
+      <div class="empty-state">
+        <h3>No data yet</h3>
+        <p>Check the server console and .env credentials, then refresh.</p>
+      </div>
+    </template>
+
+    <script src="/app.js?v=20260628-write-access-help" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "runs": [
+    {
+      "key": "front",
+      "label": "Front yard",
+      "defaultMinutes": 10,
+      "zones": [
+        {
+          "deviceId": "orbit-device-id-for-front-controller",
+          "deviceName": "Front controller",
+          "station": 1,
+          "label": "Front lawn"
+        },
+        {
+          "deviceId": "orbit-device-id-for-shared-controller",
+          "deviceName": "Shared controller",
+          "station": 1,
+          "label": "Shared front/back zone",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "key": "back",
+      "label": "Back yard",
+      "defaultMinutes": 10,
+      "zones": [
+        {
+          "deviceId": "orbit-device-id-for-shared-controller",
+          "deviceName": "Shared controller",
+          "station": 1,
+          "label": "Shared front/back zone",
+          "shared": true
+        },
+        {
+          "deviceId": "orbit-device-id-for-back-controller",
+          "deviceName": "Back controller",
+          "station": 2,
+          "label": "Back lawn"
+        }
+      ]
+    }
+  ]
+}
