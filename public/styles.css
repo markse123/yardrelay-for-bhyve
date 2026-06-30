@@ -51,6 +51,15 @@ button:hover {
   border-color: #707070;
 }
 
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible,
+summary:focus-visible {
+  outline: 3px solid var(--yellow);
+  outline-offset: 2px;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.56;
@@ -215,6 +224,16 @@ h3 {
   background: rgba(239, 86, 86, 0.14);
   border-color: rgba(239, 86, 86, 0.52);
   color: var(--red);
+}
+
+.status-button {
+  cursor: pointer;
+}
+
+.compact-button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 13px;
 }
 
 .muted {
@@ -1266,6 +1285,18 @@ summary {
   gap: 8px;
 }
 
+.logs-list {
+  height: clamp(360px, calc(100vh - 360px), 680px);
+  min-height: 360px;
+  align-content: start;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 6px 2px 2px;
+  scrollbar-gutter: stable;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .event-row {
   display: grid;
   grid-template-columns: 160px 80px 1fr;
@@ -1300,6 +1331,29 @@ summary {
   flex-wrap: wrap;
 }
 
+.log-count {
+  min-width: 82px;
+  justify-content: center;
+}
+
+.log-mode-badge {
+  width: 64px;
+  justify-content: center;
+}
+
+.log-mode-button {
+  width: 104px;
+}
+
+.pending-logs-button {
+  width: 164px;
+  white-space: nowrap;
+}
+
+.pending-logs-button.is-hidden {
+  visibility: hidden;
+}
+
 .select-input.compact {
   width: auto;
   min-width: 148px;
@@ -1312,6 +1366,8 @@ summary {
   box-shadow: var(--shadow);
   padding: 10px 12px;
   border-color: #2f2f2f;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .log-row.error {
@@ -1324,6 +1380,21 @@ summary {
   gap: 8px;
   flex-wrap: wrap;
   color: var(--muted);
+  font-size: 12px;
+}
+
+.log-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.log-copy-button {
+  min-height: 26px;
+  padding: 0 8px;
   font-size: 12px;
 }
 
@@ -1400,6 +1471,92 @@ summary {
   margin: 0;
 }
 
+.status-dialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  padding: 20px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+}
+
+.status-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.dialog-heading,
+.dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.status-summary {
+  margin: 18px 0;
+  font-size: 16px;
+}
+
+.status-detail-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.status-detail-list > div {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  background: var(--surface-2);
+}
+
+.status-detail-list dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.status-detail-list dd {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.status-error-panel {
+  margin-top: 16px;
+}
+
+.status-error-panel pre {
+  max-height: 260px;
+  margin-bottom: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .settings-panel,
 .empty-state {
   padding: 18px;
@@ -1462,6 +1619,15 @@ summary {
     justify-self: end;
     align-items: flex-end;
     justify-content: center;
+  }
+
+  .logs-list {
+    height: 60vh;
+    min-height: 320px;
+  }
+
+  .status-detail-list {
+    grid-template-columns: 1fr;
   }
 
   .tabs {

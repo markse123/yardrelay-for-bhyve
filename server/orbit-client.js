@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { sanitizeDiagnosticPath, sanitizeDiagnosticValue } from '../public/diagnostics.js';
 
 // Orbit protocol behavior was independently compared with permissively licensed
 // community clients. Exact snapshots and license notices are documented in
@@ -213,6 +214,10 @@ export class OrbitClient extends EventEmitter {
     this.ws = ws;
 
     ws.addEventListener('open', () => {
+      if (this.ws !== ws) {
+        ws.close();
+        return;
+      }
       this.wsState = 'running';
       this.reconnectMs = START_RECONNECT_MS;
       this.emit('stream-state', this.wsState);
@@ -225,6 +230,7 @@ export class OrbitClient extends EventEmitter {
     });
 
     ws.addEventListener('message', (event) => {
+      if (this.ws !== ws) return;
       try {
         const data = JSON.parse(event.data);
         if (!['ping', 'pong'].includes(data?.event)) {
@@ -243,6 +249,7 @@ export class OrbitClient extends EventEmitter {
     });
 
     ws.addEventListener('error', () => {
+      if (this.ws !== ws) return;
       this.emit('log', {
         level: 'warn',
         message: 'Orbit event stream error',
@@ -251,6 +258,8 @@ export class OrbitClient extends EventEmitter {
     });
 
     ws.addEventListener('close', () => {
+      if (this.ws !== ws) return;
+      this.ws = null;
       this.stopPing();
       this.wsState = 'stopped';
       this.emit('stream-state', this.wsState);
@@ -264,9 +273,18 @@ export class OrbitClient extends EventEmitter {
     this.intentionalClose = true;
     this.stopPing();
     clearTimeout(this.reconnectTimer);
-    if (this.ws) {
-      this.ws.close();
-    }
+    this.reconnectTimer = null;
+    const ws = this.ws;
+    const stateChanged = this.wsState !== 'stopped';
+    this.ws = null;
+    this.wsState = 'stopped';
+    if (ws) ws.close();
+    if (stateChanged) this.emit('stream-state', this.wsState);
+  }
+
+  restartStream() {
+    this.closeStream();
+    this.connectStream();
   }
 
   startPing() {
@@ -300,6 +318,7 @@ export class OrbitClient extends EventEmitter {
       at: new Date().toISOString(),
     });
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       this.connectStream();
     }, delay);
     this.reconnectMs = Math.min(this.reconnectMs * 2, MAX_RECONNECT_MS);
@@ -405,7 +424,8 @@ function sleep(ms) {
 
 function sanitizeEndpoint(endpoint) {
   const [pathname, query = ''] = String(endpoint).split('?');
-  if (!query) return pathname;
+  const sanitizedPath = sanitizeDiagnosticPath(pathname);
+  if (!query) return sanitizedPath;
   const params = new URLSearchParams(query);
   for (const key of [...params.keys()]) {
     if (/token|password|secret|key|email|session|auth/i.test(key)) {
@@ -413,7 +433,7 @@ function sanitizeEndpoint(endpoint) {
     }
   }
   const sanitized = params.toString();
-  return sanitized ? `${pathname}?${sanitized}` : pathname;
+  return sanitized ? `${sanitizedPath}?${sanitized}` : sanitizedPath;
 }
 
 function summarizeOrbitResponse(endpoint, data) {
@@ -424,27 +444,19 @@ function summarizeOrbitResponse(endpoint, data) {
   if (pathname === '/v1/devices' && Array.isArray(data)) {
     return {
       count: data.length,
-      devices: data.map((device) => ({
-        name: device.name,
-        id: shortId(device.id || device.device_id || device._id),
-        type: device.type,
-        connected: device.is_connected,
-        rainDelay: device.status?.rain_delay || 0,
-        zones: Array.isArray(device.zones) ? device.zones.length : Object.keys(device.zones || {}).length,
-      })),
+      connected: data.filter((device) => device.is_connected).length,
+      rainDelay: data.filter((device) => Number(device.status?.rain_delay || 0) > 0).length,
+      zones: data.reduce((count, device) => {
+        return count + (Array.isArray(device.zones) ? device.zones.length : Object.keys(device.zones || {}).length);
+      }, 0),
     };
   }
   if (pathname === '/v1/sprinkler_timer_programs' && Array.isArray(data)) {
     return {
       count: data.length,
-      programs: data.map((program) => ({
-        name: program.name,
-        id: shortId(program.id),
-        deviceId: shortId(program.device_id),
-        enabled: program.enabled,
-        smart: Boolean(program.is_smart_program),
-        starts: Array.isArray(program.start_times) ? program.start_times.length : 0,
-      })),
+      enabled: data.filter((program) => program.enabled).length,
+      smart: data.filter((program) => program.is_smart_program).length,
+      starts: data.reduce((count, program) => count + (Array.isArray(program.start_times) ? program.start_times.length : 0), 0),
     };
   }
   if (pathname.startsWith('/v1/watering_events/') && Array.isArray(data)) {
@@ -460,7 +472,7 @@ function summarizeOrbitResponse(endpoint, data) {
 
 function summarizePayload(value) {
   if (value === undefined) return null;
-  const scrubbed = scrubSensitive(value);
+  const scrubbed = sanitizeDiagnosticValue(value);
   const text = safeJson(scrubbed);
   if (text.length <= 2200) {
     return scrubbed;
@@ -469,29 +481,6 @@ function summarizePayload(value) {
     truncated: true,
     preview: `${text.slice(0, 2200)}...`,
   };
-}
-
-function scrubSensitive(value) {
-  if (Array.isArray(value)) {
-    return value.map(scrubSensitive);
-  }
-  if (!value || typeof value !== 'object') {
-    return value;
-  }
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [
-      key,
-      /token|password|secret|key|email|session|authorization|cookie/i.test(key)
-        ? '[redacted]'
-        : scrubSensitive(item),
-    ]),
-  );
-}
-
-function shortId(value) {
-  if (value === undefined || value === null || value === '') return null;
-  const text = String(value);
-  return text.length > 8 ? `...${text.slice(-6)}` : text;
 }
 
 function safeJson(value) {
