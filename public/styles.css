@@ -1545,16 +1545,41 @@ summary {
   margin-top: 18px;
 }
 
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
+.diagnostics-toast {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 1000;
+  max-width: min(420px, calc(100vw - 32px));
+  margin: 0;
+  border: 1px solid rgba(126, 224, 143, 0.62);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #17331d;
+  color: #dfffe5;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.48);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.diagnostics-toast.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.diagnostics-toast.error {
+  border-color: rgba(239, 86, 86, 0.72);
+  background: #3a1717;
+  color: #ffe2e2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diagnostics-toast {
+    transform: none;
+    transition: none;
+  }
 }
 
 .settings-panel,

@@ -108,7 +108,7 @@
             <div class="logs-toolbar">
               <span id="logCount" class="badge log-count">0 entries</span>
               <span id="logModeBadge" class="badge ok log-mode-badge">Live</span>
-              <button id="logModeButton" class="secondary compact-button log-mode-button" type="button" aria-pressed="false">Pause</button>
+              <button id="logModeButton" class="secondary compact-button log-mode-button" type="button">Pause</button>
               <button id="pendingLogsButton" class="secondary compact-button pending-logs-button is-hidden" type="button" aria-hidden="true" disabled>Show latest</button>
               <select id="logFilter" class="select-input compact" aria-label="Log filter">
                 <option value="all">All traffic</option>
@@ -196,7 +196,7 @@
       </div>
     </dialog>
 
-    <p id="diagnosticsAnnouncement" class="sr-only" aria-live="polite" aria-atomic="true"></p>
+    <p id="diagnosticsAnnouncement" class="diagnostics-toast" role="status" aria-live="polite" aria-atomic="true"></p>
 
     <template id="emptyTemplate">
       <div class="empty-state">
