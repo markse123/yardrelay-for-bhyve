@@ -5,13 +5,25 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
+  sanitizeDiagnosticMessage,
   sanitizeDiagnosticPath,
   sanitizeDiagnosticText,
   sanitizeDiagnosticValue,
   summarizeYardRunResponseForDiagnostics,
 } from '../public/diagnostics.js';
-import { OrbitClient, PROGRAM_MUTABLE_KEYS, pickProgramMutableFields, pickProgramUpdateFields } from './orbit-client.js';
-import { createSerialTaskRunner, ensureOrbitConnection, ensureScheduledRefresh } from './orbit-lifecycle.js';
+import {
+  OrbitClient,
+  PROGRAM_MUTABLE_KEYS,
+  pickProgramMutableFields,
+  pickProgramUpdateFields,
+  sanitizeDiagnosticLogEntry,
+} from './orbit-client.js';
+import {
+  createRefreshTaskRunner,
+  ensureOrbitConnection,
+  ensureScheduledRefresh,
+  refreshRequiresFreshTask,
+} from './orbit-lifecycle.js';
 import {
   buildTrustedHosts,
   isLoopbackAddress,
@@ -85,6 +97,7 @@ const RAIN_DELAY_VERIFY_DELAYS_MS = [1000, 2000, 3500];
 const MAX_REQUEST_LOGS = 250;
 const MAX_STATUS_ERROR_LENGTH = 1200;
 const MAX_STATUS_ERROR_CONTEXT_LENGTH = 160;
+const SAFE_DIAGNOSTIC_QUERY_KEYS = new Set(['hours', 'page', 'per-page', 't']);
 const YARD_RUN_DEFAULT_MINUTES = 10;
 const YARD_RUN_STEP_GAP_MS = 2500;
 const WATERING_RUNS = loadWateringRuns(yardRunConfigPath);
@@ -103,7 +116,7 @@ const recentEvents = [];
 const recentLogs = [];
 let orbit = null;
 let refreshTimer = null;
-const runRefreshTask = createSerialTaskRunner();
+const runRefreshTask = createRefreshTaskRunner();
 let yardRunTimer = null;
 let yardRunPersistQueue = Promise.resolve();
 let shuttingDown = false;
@@ -151,15 +164,19 @@ const server = createServer(async (req, res) => {
     res.requestLog = requestLog;
     await route(req, res);
   } catch (error) {
+    const requestError = sanitizeDiagnosticMessage(
+      error?.message || error,
+      { maxLength: MAX_STATUS_ERROR_LENGTH },
+    );
     if (requestLog) {
-      requestLog.error = error.message;
+      requestLog.error = requestError;
     }
     const statusCode = error.statusCode || 500;
     sendJson(res, statusCode, { error: statusCode >= 500 ? 'Internal server error' : error.message });
     if (statusCode >= 500) {
       logError('Unhandled request error', error);
     } else {
-      addEvent('warn', error.message);
+      addEvent('warn', requestError);
       broadcastState();
     }
   }
@@ -508,7 +525,13 @@ function refreshSoon() {
 }
 
 function refreshState(options = {}) {
-  return runRefreshTask(() => performRefreshState(options));
+  return runRefreshTask(
+    () => performRefreshState(options),
+    {
+      force: refreshRequiresFreshTask(options),
+      forceLogin: Boolean(options.forceLogin),
+    },
+  );
 }
 
 async function performRefreshState({ forceLogin = false } = {}) {
@@ -1690,14 +1713,10 @@ function addEvent(level, message, detail = null) {
 }
 
 function addLog(entry) {
-  const normalized = {
-    id: entry.id || crypto.randomUUID(),
-    at: entry.at || new Date().toISOString(),
-    source: entry.source || 'local',
-    kind: entry.kind || 'event',
-    level: entry.level || (entry.ok === false ? 'error' : 'info'),
-    ...entry,
-  };
+  const normalized = sanitizeDiagnosticLogEntry(entry, {
+    defaultId: crypto.randomUUID(),
+    defaultAt: new Date().toISOString(),
+  });
   recentLogs.unshift(normalized);
   recentLogs.splice(MAX_REQUEST_LOGS);
   broadcast('request-log', normalized);
@@ -1826,7 +1845,8 @@ function sanitizePath(pathname) {
   if (!query) return sanitizedPath;
   const params = new URLSearchParams(query);
   for (const key of [...params.keys()]) {
-    if (/token|password|secret|key|email|session|auth|challenge|proof/i.test(key)) {
+    const values = params.getAll(key);
+    if (!SAFE_DIAGNOSTIC_QUERY_KEYS.has(key) || values.some((value) => !/^\d+$/.test(value))) {
       params.set(key, '[redacted]');
     }
   }
@@ -1849,8 +1869,9 @@ function safeJson(value) {
 
 function logError(message, error) {
   const context = sanitizeDiagnosticText(message, { maxLength: MAX_STATUS_ERROR_CONTEXT_LENGTH }) || 'Controller error';
-  const detail = sanitizeDiagnosticPath(
-    sanitizeDiagnosticText(error?.message || error, { maxLength: MAX_STATUS_ERROR_LENGTH }),
+  const detail = sanitizeDiagnosticMessage(
+    error?.message || error,
+    { maxLength: MAX_STATUS_ERROR_LENGTH },
   ) || 'Unknown error';
   const at = new Date().toISOString();
   console.error(`${context}: ${detail}`);

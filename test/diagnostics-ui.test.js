@@ -10,8 +10,10 @@ import {
   formatLogResponseForClipboard,
   mergeLogEntries,
   normalizeLogEntries,
+  sanitizeDiagnosticMessage,
   sanitizeDiagnosticPath,
   sanitizeDiagnosticText,
+  sanitizeDiagnosticValue,
   summarizeYardRunResponseForDiagnostics,
 } from '../public/diagnostics.js';
 
@@ -131,6 +133,171 @@ test('clipboard formatting redacts unsanitized values without mutating the log e
   assert.match(freeform, /\/v1\/watering_events\/\[redacted\]/);
 });
 
+test('structured and free-form diagnostics redact private property and personal metadata', () => {
+  const addressKey = ['formatted', 'address'].join('_');
+  const address = ['742', 'Evergreen', 'Terrace'].join(' ');
+  const macKey = ['mac', 'address'].join('_');
+  const mac = ['02:42:ac', '11:00:02'].join(':');
+  const firstNameKey = ['first', 'name'].join('_');
+  const personalName = ['Synthetic', 'Resident'].join(' ');
+  const phoneKey = ['phone', 'number'].join('_');
+  const phone = ['202', '555', '0142'].join('-');
+  const imageKey = ['image', 'url'].join('_');
+  const image = ['device-assets', ['abcdefabcdef', 'abcdefabcdef'].join('')].join('/');
+  const locationKey = ['full', 'location'].join('_');
+  const addressLineKey = ['line', '1'].join('_');
+
+  const structured = JSON.parse(formatDiagnosticValue({
+    [addressKey]: address,
+    [macKey]: mac,
+    [firstNameKey]: personalName,
+    [phoneKey]: phone,
+    [imageKey]: image,
+    [locationKey]: { latitude: 38.123, longitude: -77.456 },
+    [addressLineKey]: address,
+    connected: false,
+  }));
+
+  for (const key of [addressKey, macKey, firstNameKey, phoneKey, imageKey, locationKey, addressLineKey]) {
+    assert.equal(structured[key], '[redacted]');
+  }
+  assert.equal(structured.connected, false);
+
+  const freeform = sanitizeDiagnosticText([
+    address,
+    mac,
+    `${firstNameKey}="${personalName}"`,
+    phone,
+    image,
+  ].join(' | '));
+  for (const privateValue of [address, mac, personalName, phone, image]) {
+    assert.equal(freeform.includes(privateValue), false);
+  }
+  assert.match(freeform, /\[redacted (?:address|MAC|phone|image)\]/);
+  assert.match(freeform, /first_name=\[redacted\]/);
+});
+
+test('diagnostics redact URL userinfo in free text, paths, and structured values', () => {
+  const privateUser = ['private', 'user'].join('-');
+  const privatePassword = ['private', 'password'].join('-');
+  const credentialUrl = ['https://', privateUser, ':', privatePassword, '@127.0.0.1/v1/custom?note=private'].join('');
+  const expectedUrl = 'https://[redacted]@127.0.0.1/v1/custom?note=%5Bredacted%5D';
+
+  assert.equal(sanitizeDiagnosticPath(credentialUrl), expectedUrl);
+  assert.equal(sanitizeDiagnosticMessage(`Fetch failed at ${credentialUrl}.`), `Fetch failed at ${expectedUrl}.`);
+  assert.deepEqual(sanitizeDiagnosticValue({ endpoint: credentialUrl }), { endpoint: expectedUrl });
+  for (const output of [
+    sanitizeDiagnosticPath(credentialUrl),
+    sanitizeDiagnosticMessage(`Fetch failed at ${credentialUrl}.`),
+    JSON.stringify(sanitizeDiagnosticValue({ endpoint: credentialUrl })),
+  ]) {
+    assert.equal(output.includes(privateUser), false);
+    assert.equal(output.includes(privatePassword), false);
+  }
+});
+
+test('embedded diagnostic targets redact query values containing punctuation', () => {
+  for (const separator of [',', ';', ')']) {
+    const privateValue = ['Private', separator, 'Resident'].join('');
+    const sanitized = sanitizeDiagnosticMessage(`Retry? fetch failed /v1/custom?note=${privateValue}`);
+
+    assert.match(sanitized, /Retry\? fetch failed \/v1\/custom\?note=%5Bredacted%5D/);
+    assert.equal(sanitized.includes('Private'), false);
+    assert.equal(sanitized.includes('Resident'), false);
+  }
+});
+
+test('embedded diagnostic redaction preserves the requested final length bound', () => {
+  const privateValues = ['one', 'two', 'three'];
+  const sanitized = sanitizeDiagnosticMessage(
+    `/v1/custom?a=${privateValues[0]}&b=${privateValues[1]}&c=${privateValues[2]}`,
+    { maxLength: 50 },
+  );
+
+  assert.ok(sanitized.length <= 50);
+  for (const privateValue of privateValues) {
+    assert.equal(sanitized.includes(privateValue), false);
+  }
+  assert.ok(sanitizeDiagnosticMessage('/v1/custom?a=x', { maxLength: 2 }).length <= 2);
+});
+
+test('multi-segment identifier and private-label keys are redacted in structured and free text', () => {
+  const keys = [
+    ['subscribe', 'device', 'id'].join('_'),
+    ['parent', 'device', 'id'].join('_'),
+    ['zone', 'display', 'name'].join('_'),
+    ['sprinkler', 'timer', 'name'].join('_'),
+    ['owner', 'full', 'name'].join('_'),
+    ['location', 'name'].join('_'),
+    ['parent', 'Device', 'Id'].join(''),
+    ['zone', 'Display', 'Name'].join(''),
+  ];
+  const values = keys.map((_, index) => `private-value-${index}`);
+  const input = Object.fromEntries(keys.map((key, index) => [key, values[index]]));
+  const structured = JSON.parse(formatDiagnosticValue(input));
+
+  for (const key of keys) {
+    assert.equal(structured[key], '[redacted]');
+  }
+
+  const freeform = sanitizeDiagnosticText(
+    keys.map((key, index) => `${key}="${values[index]}"`).join(' '),
+  );
+  for (const value of values) {
+    assert.equal(freeform.includes(value), false);
+  }
+  for (const key of keys) {
+    assert.match(freeform, new RegExp(`${key}=\\[redacted\\]`));
+  }
+});
+
+test('multiword private assignments stop before the next assignment or delimiter', () => {
+  const cases = [
+    ['device_name=Back Yard next=ok', 'device_name=[redacted] next=ok'],
+    ['full_location=Back Yard, next=ok', 'full_location=[redacted], next=ok'],
+    ['owner_full_name=Example Resident; next=ok', 'owner_full_name=[redacted]; next=ok'],
+    ['ownerFullName=Example Resident next=ok', 'ownerFullName=[redacted] next=ok'],
+  ];
+
+  for (const [input, expected] of cases) {
+    assert.equal(sanitizeDiagnosticText(input), expected);
+  }
+});
+
+test('structured diagnostics never invoke getters or toJSON and remain JSON-safe', () => {
+  let getterCalls = 0;
+  let toJsonCalls = 0;
+  const hostile = {
+    count: 12n,
+    missing: undefined,
+    callback() {},
+    symbol: Symbol('private'),
+    toJSON() {
+      toJsonCalls += 1;
+      return { token: 'private-token' };
+    },
+  };
+  Object.defineProperty(hostile, 'getter', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return 'private getter value';
+    },
+  });
+
+  const formatted = formatDiagnosticValue(hostile);
+  const structured = JSON.parse(formatted);
+  assert.equal(getterCalls, 0);
+  assert.equal(toJsonCalls, 0);
+  assert.equal(structured.count, '12');
+  assert.equal(structured.missing, '[unavailable]');
+  assert.equal(structured.callback, '[unavailable]');
+  assert.equal(structured.symbol, '[unavailable]');
+  assert.equal(structured.getter, '[unavailable]');
+  assert.equal(structured.toJSON, '[unavailable]');
+  assert.doesNotMatch(formatted, /private-token|private getter value/);
+});
+
 test('status diagnostic text is bounded, single-line, and redacts credential-shaped values', () => {
   const sanitized = sanitizeDiagnosticText(
     'Login failed\nemail=person@example.com password="not-a-real-secret" Authorization: Bearer abc.def-123',
@@ -153,10 +320,58 @@ test('status diagnostic text is bounded, single-line, and redacts credential-sha
     sanitizeDiagnosticPath('/v1/watering_events/device-123?page=1'),
     '/v1/watering_events/[redacted]?page=1',
   );
+  assert.equal(sanitizeDiagnosticText('Call 2025550142 or 12025550143'), 'Call [redacted phone] or [redacted phone]');
   const pathError = sanitizeDiagnosticText(
     "ENOENT /Users/alice/private/data.json file:///home/alice/private.json C:\\Users\\alice\\private.json",
   );
   assert.doesNotMatch(pathError, /alice|private\.json|data\.json/);
+});
+
+test('diagnostic paths preserve only known numeric operational query values', () => {
+  const privateName = ['Synthetic', 'Resident'].join(' ');
+  const privateAddress = ['742', 'Evergreen', 'Terrace'].join(' ');
+  const sanitized = sanitizeDiagnosticPath([
+    '/api/history?hours=24&page=2&per-page=50&t=1719774000',
+    `name=${encodeURIComponent(privateName)}`,
+    `address=${encodeURIComponent(privateAddress)}`,
+    'offset=10',
+  ].join('&') + '#private-fragment');
+  const parsed = new URL(sanitized, 'http://localhost');
+
+  assert.equal(parsed.searchParams.get('hours'), '24');
+  assert.equal(parsed.searchParams.get('page'), '2');
+  assert.equal(parsed.searchParams.get('per-page'), '50');
+  assert.equal(parsed.searchParams.get('t'), '1719774000');
+  assert.equal(parsed.searchParams.get('name'), '[redacted]');
+  assert.equal(parsed.searchParams.get('address'), '[redacted]');
+  assert.equal(parsed.searchParams.get('offset'), '[redacted]');
+  assert.equal(parsed.hash, '');
+  assert.equal(sanitized.includes(privateName), false);
+  assert.equal(sanitized.includes(privateAddress), false);
+
+  const invalidOperationalValue = new URL(
+    sanitizeDiagnosticPath('/api/history?page=second'),
+    'http://localhost',
+  );
+  assert.equal(invalidOperationalValue.searchParams.get('page'), '[redacted]');
+  assert.equal(sanitizeDiagnosticPath('/v1/custom#token=private-fragment'), '/v1/custom');
+});
+
+test('question-mark prose remains readable while real path queries are sanitized', () => {
+  const prose = 'Retry? The controller is offline';
+  assert.equal(formatDiagnosticValue(prose), prose);
+  const embeddedPath = formatDiagnosticValue('Retry? fetch failed /v1/custom?note=PrivateResident');
+  assert.match(embeddedPath, /Retry\?/);
+  assert.match(embeddedPath, /note=%5Bredacted%5D/);
+  assert.doesNotMatch(embeddedPath, /PrivateResident/);
+  assert.equal(
+    formatLogEntryForClipboard({ at: 'now', label: prose }),
+    ['Time: now', 'Source: local', 'Type: event', `Path: ${prose}`].join('\n'),
+  );
+  assert.equal(
+    sanitizeDiagnosticPath('/v1/custom?note=private-value&page=2'),
+    '/v1/custom?note=%5Bredacted%5D&page=2',
+  );
 });
 
 test('copied status details redact endpoint and identifier values', () => {
@@ -195,6 +410,22 @@ test('yard-run response summaries omit property-specific labels and keys', () =>
   assert.doesNotMatch(JSON.stringify(summary), /Front Yard|front-yard|Back Yard|Side Yard/);
 });
 
+test('yard-run response summaries retain bounded sanitized errors and warnings', () => {
+  const privateDeviceId = ['0123456789ab', 'cdef01234567'].join('');
+  const phone = ['202', '555', '0142'].join('-');
+  const summary = summarizeYardRunResponseForDiagnostics({
+    ok: false,
+    error: `Unknown device ${privateDeviceId}`,
+    warning: `Call ${phone} ${'after the retry window '.repeat(40)}`,
+  });
+
+  assert.equal(summary.ok, false);
+  assert.equal(summary.error, 'Unknown device [redacted]');
+  assert.equal(summary.warning.includes(phone), false);
+  assert.match(summary.warning, /\[redacted phone\]/);
+  assert.ok(summary.warning.length <= 500);
+});
+
 test('dashboard diagnostics expose stable, keyboard-accessible inspection controls', async () => {
   const [html, script, styles, server] = await Promise.all([
     readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
@@ -208,6 +439,7 @@ test('dashboard diagnostics expose stable, keyboard-accessible inspection contro
   assert.match(html, /id="statusRetryButton"[^>]*>Retry once<\/button>/);
   assert.match(html, /id="logsList"[^>]*role="region"[^>]*tabindex="0"/);
   assert.match(html, /id="diagnosticsAnnouncement"[^>]*aria-live="polite"/);
+  assert.match(html, /id="diagnosticsAnnouncement"[^>]*class="diagnostics-toast"[^>]*role="status"/);
   assert.match(html, /id="statusRetryMessage"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.match(html, /styles\.css\?v=20260630-stable-diagnostics/);
   assert.match(html, /app\.js\?v=20260630-stable-diagnostics/);
@@ -218,11 +450,24 @@ test('dashboard diagnostics expose stable, keyboard-accessible inspection contro
   assert.match(script, /apiPost\('\/api\/reconnect'/);
   assert.match(script, /pauseLogUpdatesForCurrentViewport\(\);\s*state\.logs = mergeLogEntries/s);
   assert.match(script, /className = `badge log-mode-badge/);
+  assert.match(script, /function resumeLogUpdates\(\)[\s\S]*state\.openLogPayloadIds\.clear\(\);[\s\S]*renderLogs\(\);/);
+  assert.match(script, /<pre>\$\{escapeHtml\(formatDiagnosticValue\(payload\)\)\}<\/pre>/);
   assert.match(script, /els\.statusDialog\?\.open\s*\? els\.statusRetryMessage/);
+  assert.match(script, /announceDiagnostic\(`\$\{label\} copied\.`\)/);
+  assert.match(script, /function announceDiagnosticError\(error\)[\s\S]*\{ error: true \}/);
   assert.match(script, /finally \{\s*textarea\.remove\(\)/s);
+  assert.doesNotMatch(html, /id="logModeButton"[^>]*aria-pressed/);
+  assert.doesNotMatch(script, /logModeButton\.setAttribute\('aria-pressed'/);
   assert.match(styles, /\.logs-list\s*\{[\s\S]*height:\s*clamp\([^;]+;[\s\S]*overflow-y:\s*auto;/);
   assert.match(styles, /\.status-dialog::backdrop/);
+  assert.match(styles, /\.diagnostics-toast\s*\{[\s\S]*position:\s*fixed;[\s\S]*opacity:\s*0;[\s\S]*pointer-events:\s*none;/);
+  assert.match(styles, /\.diagnostics-toast\.is-visible\s*\{[\s\S]*opacity:\s*1;/);
+  assert.doesNotMatch(styles, /\.diagnostics-toast(?:\.is-visible)?\s*\{[^}]*visibility:\s*(?:hidden|visible)/);
+  assert.match(styles, /@media \(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*\.diagnostics-toast\s*\{[^}]*transform:\s*none;[^}]*transition:\s*none;/);
   assert.match(server, /\/api\/reconnect[\s\S]*forceLogin:\s*true/);
+  assert.match(server, /runRefreshTask\([\s\S]*refreshRequiresFreshTask\(options\)/);
+  assert.match(server, /forceLogin:\s*Boolean\(options\.forceLogin\)/);
+  assert.match(server, /addEvent\('warn', requestError\)/);
   assert.match(server, /clearTimeout\(refreshSoonTimer\)/);
   assert.doesNotMatch(server, /rain delay (?:cleared )?for \$\{deviceName\}/);
 });

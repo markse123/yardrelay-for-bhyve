@@ -40,14 +40,68 @@ export function ensureScheduledRefresh(currentTimer, schedule) {
   return schedule();
 }
 
-export function createSerialTaskRunner() {
-  let tail = Promise.resolve();
-  return (task) => {
+export function refreshRequiresFreshTask(options = {}) {
+  return Boolean(options?.force || options?.forceLogin);
+}
+
+export function createRefreshTaskRunner() {
+  let active = null;
+  let pendingForced = null;
+
+  return (task, { force = false, forceLogin = false } = {}) => {
     if (typeof task !== 'function') {
       return Promise.reject(new TypeError('task must be a function'));
     }
-    const result = tail.catch(() => {}).then(task);
-    tail = result;
-    return result;
+    const priority = forceLogin ? 2 : (force ? 1 : 0);
+
+    if (!active) {
+      return start(task);
+    }
+
+    if (priority === 0) {
+      return pendingForced?.promise || active.promise;
+    }
+
+    if (pendingForced) {
+      if (priority > pendingForced.priority) {
+        pendingForced.task = task;
+        pendingForced.priority = priority;
+      }
+      return pendingForced.promise;
+    }
+
+    pendingForced = deferredTask(task, priority);
+    return pendingForced.promise;
   };
+
+  function start(task) {
+    const record = {
+      promise: Promise.resolve().then(task),
+    };
+    active = record;
+    record.promise.then(
+      () => advance(record),
+      () => advance(record),
+    );
+    return record.promise;
+  }
+
+  function advance(record) {
+    if (active !== record) return;
+    active = null;
+    const next = pendingForced;
+    pendingForced = null;
+    if (!next) return;
+    start(next.task).then(next.resolve, next.reject);
+  }
+}
+
+function deferredTask(task, priority) {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { task, priority, promise, resolve, reject };
 }

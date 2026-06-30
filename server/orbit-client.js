@@ -1,5 +1,10 @@
 import { EventEmitter } from 'node:events';
-import { sanitizeDiagnosticPath, sanitizeDiagnosticValue } from '../public/diagnostics.js';
+import {
+  sanitizeDiagnosticPath,
+  sanitizeDiagnosticMessage,
+  sanitizeDiagnosticText,
+  sanitizeDiagnosticValue,
+} from '../public/diagnostics.js';
 
 // Orbit protocol behavior was independently compared with permissively licensed
 // community clients. Exact snapshots and license notices are documented in
@@ -14,6 +19,27 @@ const USER_AGENT =
 
 const MAX_RECONNECT_MS = 300_000;
 const START_RECONNECT_MS = 5_000;
+export const DEFAULT_ORBIT_REQUEST_TIMEOUT_MS = 20_000;
+const MAX_ORBIT_REQUEST_TIMEOUT_MS = 120_000;
+const SAFE_DIAGNOSTIC_QUERY_KEYS = new Set(['hours', 'page', 'per-page', 't']);
+const DIAGNOSTIC_LOG_FIELDS = [
+  'id',
+  'at',
+  'source',
+  'kind',
+  'level',
+  'method',
+  'path',
+  'label',
+  'message',
+  'error',
+  'client',
+  'status',
+  'ok',
+  'durationMs',
+  'request',
+  'response',
+];
 
 export const PROGRAM_UPDATE_KEYS = [
   'budget',
@@ -31,12 +57,19 @@ export const PROGRAM_UPDATE_KEYS = [
 export const PROGRAM_MUTABLE_KEYS = ['budget', 'enabled', 'frequency', 'start_times'];
 
 export class OrbitClient extends EventEmitter {
-  constructor({ email, password, fetchImpl = fetch, WebSocketImpl = globalThis.WebSocket }) {
+  constructor({
+    email,
+    password,
+    fetchImpl = fetch,
+    WebSocketImpl = globalThis.WebSocket,
+    requestTimeoutMs = DEFAULT_ORBIT_REQUEST_TIMEOUT_MS,
+  }) {
     super();
     this.email = email;
     this.password = password;
     this.fetch = fetchImpl;
     this.WebSocketImpl = WebSocketImpl;
+    this.requestTimeoutMs = normalizeRequestTimeout(requestTimeoutMs);
     this.token = null;
     this.apiKey = null;
     this.sessionToken = null;
@@ -243,8 +276,8 @@ export class OrbitClient extends EventEmitter {
           });
         }
         this.emit('message', data);
-      } catch (error) {
-        this.emit('error', new Error(`Failed to parse Orbit event: ${error.message}`));
+      } catch {
+        this.emit('error', new Error('Failed to parse an Orbit event'));
       }
     });
 
@@ -293,9 +326,10 @@ export class OrbitClient extends EventEmitter {
       try {
         this.sendMessage({ event: 'ping' });
       } catch (error) {
+        const detail = safeFailureDetail(error, { maxLength: 240, fallback: 'send failed' });
         this.emit('log', {
           level: 'warn',
-          message: `Orbit ping failed: ${error.message}`,
+          message: `Orbit ping failed: ${detail}`,
           at: new Date().toISOString(),
         });
       }
@@ -326,28 +360,44 @@ export class OrbitClient extends EventEmitter {
 
   async requestRaw(endpoint, { method = 'GET', authenticated = true, body } = {}) {
     const startedAt = Date.now();
+    const safeEndpoint = sanitizeEndpoint(endpoint);
+    const timeout = createRequestTimeout({
+      endpoint: safeEndpoint,
+      method,
+      timeoutMs: this.requestTimeoutMs,
+    });
     let response;
+    let text = '';
     try {
-      response = await this.fetch(`${API_HOST}${endpoint}`, {
+      const request = Promise.resolve().then(() => this.fetch(`${API_HOST}${endpoint}`, {
         method,
         headers: this.headers({ authenticated }),
         body: body === undefined ? undefined : JSON.stringify(body),
-      });
+        signal: timeout.signal,
+      }));
+      response = await Promise.race([request, timeout.promise]);
+      const responseBody = Promise.resolve().then(() => response.text());
+      text = await Promise.race([responseBody, timeout.promise]);
     } catch (error) {
+      const timedOut = hasFailureCode(error, 'ORBIT_REQUEST_TIMEOUT');
+      const detail = safeFailureDetail(error);
       this.emit('request-log', {
         source: 'orbit',
         kind: 'http',
         method,
-        path: sanitizeEndpoint(endpoint),
+        path: safeEndpoint,
+        status: response?.status,
         ok: false,
         durationMs: Date.now() - startedAt,
         request: summarizePayload(body),
-        response: { error: error.message },
+        response: { error: detail },
       });
-      throw error;
+      if (timedOut) throw error;
+      throw new Error(`Orbit ${method} ${safeEndpoint} failed: ${detail}`, { cause: error });
+    } finally {
+      timeout.cancel();
     }
 
-    const text = await response.text();
     let data = null;
     if (text) {
       try {
@@ -362,7 +412,7 @@ export class OrbitClient extends EventEmitter {
       source: 'orbit',
       kind: 'http',
       method,
-      path: sanitizeEndpoint(endpoint),
+      path: safeEndpoint,
       status: response.status,
       ok: response.ok,
       durationMs: Date.now() - startedAt,
@@ -372,7 +422,7 @@ export class OrbitClient extends EventEmitter {
 
     if (!response.ok) {
       const detail = typeof responseSummary === 'string' ? responseSummary : JSON.stringify(responseSummary);
-      throw new Error(`Orbit ${method} ${endpoint} failed: ${response.status} ${detail}`);
+      throw new Error(`Orbit ${method} ${safeEndpoint} failed: ${response.status} ${detail}`);
     }
 
     return data;
@@ -416,10 +466,151 @@ export function pickProgramMutableFields(program) {
   );
 }
 
+export function sanitizeDiagnosticLogEntry(entry, {
+  defaultId = 'diagnostic-log',
+  defaultAt = new Date().toISOString(),
+} = {}) {
+  const source = copyDiagnosticLogFields(entry);
+  const normalized = {
+    id: sanitizeOperationalText(source.id || defaultId, 160) || 'diagnostic-log',
+    at: sanitizeOperationalText(source.at || defaultAt, 80) || defaultAt,
+    source: sanitizeOperationalText(source.source || 'local', 40) || 'local',
+    kind: sanitizeOperationalText(source.kind || 'event', 80) || 'event',
+    level: sanitizeOperationalText(source.level || (source.ok === false ? 'error' : 'info'), 40) || 'info',
+  };
+
+  if (source.method !== undefined) {
+    normalized.method = sanitizeOperationalText(source.method, 24).toUpperCase();
+  }
+  if (source.path !== undefined) {
+    normalized.path = safeDiagnosticPath(source.path);
+  }
+  if (source.label !== undefined) {
+    normalized.label = sanitizeLogMessage(source.label, 500);
+  }
+  if (source.message !== undefined) {
+    normalized.message = sanitizeLogMessage(source.message, 2000);
+  }
+  if (source.error !== undefined) {
+    normalized.error = sanitizeLogMessage(source.error, 2000);
+  }
+  if (source.client !== undefined) {
+    normalized.client = sanitizeOperationalText(source.client, 160);
+  }
+  if (source.status !== undefined) {
+    normalized.status = Number.isFinite(source.status)
+      ? source.status
+      : sanitizeOperationalText(source.status, 40);
+  }
+  if (typeof source.ok === 'boolean') {
+    normalized.ok = source.ok;
+  }
+  if (Number.isFinite(source.durationMs) && source.durationMs >= 0) {
+    normalized.durationMs = source.durationMs;
+  }
+  if (Object.prototype.hasOwnProperty.call(source, 'request')) {
+    normalized.request = summarizePayload(source.request);
+  }
+  if (Object.prototype.hasOwnProperty.call(source, 'response')) {
+    normalized.response = summarizePayload(source.response);
+  }
+  return normalized;
+}
+
+function copyDiagnosticLogFields(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return {};
+  let descriptors;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(entry);
+  } catch {
+    return {};
+  }
+  const copy = Object.create(null);
+  for (const key of DIAGNOSTIC_LOG_FIELDS) {
+    const descriptor = descriptors[key];
+    if (!descriptor) continue;
+    copy[key] = Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      ? descriptor.value
+      : '[unavailable]';
+  }
+  return copy;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function normalizeRequestTimeout(value) {
+  const timeout = Number(value);
+  if (!Number.isInteger(timeout) || timeout < 1 || timeout > MAX_ORBIT_REQUEST_TIMEOUT_MS) {
+    throw new TypeError(`requestTimeoutMs must be an integer from 1 to ${MAX_ORBIT_REQUEST_TIMEOUT_MS}`);
+  }
+  return timeout;
+}
+
+function createRequestTimeout({ endpoint, method, timeoutMs }) {
+  const controller = new AbortController();
+  const endpointPath = String(endpoint).split('?')[0];
+  const error = new Error(`Orbit ${method} ${endpointPath} timed out after ${timeoutMs}ms`);
+  error.name = 'TimeoutError';
+  error.code = 'ORBIT_REQUEST_TIMEOUT';
+  let timer = null;
+  const promise = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(error);
+      controller.abort(error);
+    }, timeoutMs);
+  });
+  return {
+    signal: controller.signal,
+    promise,
+    cancel() {
+      clearTimeout(timer);
+      timer = null;
+    },
+  };
+}
+
+function sanitizeOperationalText(value, maxLength) {
+  try {
+    return sanitizeDiagnosticText(value, { maxLength });
+  } catch {
+    return '[unavailable]';
+  }
+}
+
+function safeDiagnosticPath(value) {
+  try {
+    return sanitizeDiagnosticPath(value);
+  } catch {
+    return '[unavailable]';
+  }
+}
+
+function sanitizeLogMessage(value, maxLength) {
+  try {
+    return sanitizeDiagnosticMessage(value, { maxLength });
+  } catch {
+    return '[unavailable]';
+  }
+}
+
+function safeFailureDetail(error, { maxLength = 500, fallback = 'request failed' } = {}) {
+  try {
+    return sanitizeDiagnosticMessage(error?.message || error, { maxLength }) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function hasFailureCode(error, expectedCode) {
+  try {
+    return error?.code === expectedCode;
+  } catch {
+    return false;
+  }
 }
 
 function sanitizeEndpoint(endpoint) {
@@ -428,7 +619,8 @@ function sanitizeEndpoint(endpoint) {
   if (!query) return sanitizedPath;
   const params = new URLSearchParams(query);
   for (const key of [...params.keys()]) {
-    if (/token|password|secret|key|email|session|auth/i.test(key)) {
+    const values = params.getAll(key);
+    if (!SAFE_DIAGNOSTIC_QUERY_KEYS.has(key) || values.some((value) => !/^\d+$/.test(value))) {
       params.set(key, '[redacted]');
     }
   }
@@ -472,7 +664,7 @@ function summarizeOrbitResponse(endpoint, data) {
 
 function summarizePayload(value) {
   if (value === undefined) return null;
-  const scrubbed = sanitizeDiagnosticValue(value);
+  const scrubbed = safeDiagnosticValue(value);
   const text = safeJson(scrubbed);
   if (text.length <= 2200) {
     return scrubbed;
@@ -483,10 +675,26 @@ function summarizePayload(value) {
   };
 }
 
+function safeDiagnosticValue(value) {
+  try {
+    const sanitized = sanitizeDiagnosticValue(value);
+    const serialized = JSON.stringify(sanitized, (_key, item) => {
+      if (typeof item === 'bigint') return String(item);
+      if (['function', 'symbol', 'undefined'].includes(typeof item)) return '[unavailable]';
+      return item;
+    });
+    if (serialized === undefined) return '[unavailable]';
+    return JSON.parse(serialized);
+  } catch {
+    return '[unavailable]';
+  }
+}
+
 function safeJson(value) {
   try {
-    return JSON.stringify(value);
+    const serialized = JSON.stringify(value);
+    return typeof serialized === 'string' ? serialized : '[unavailable]';
   } catch {
-    return String(value);
+    return '[unavailable]';
   }
 }

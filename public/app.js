@@ -1,6 +1,7 @@
 import {
   countNewLogEntries,
   formatControllerStatusForClipboard,
+  formatDiagnosticValue,
   formatLogEntryForClipboard,
   formatLogResponseForClipboard,
   mergeLogEntries,
@@ -11,6 +12,9 @@ import {
 const MANUAL_RUN_CAP_STORAGE_KEY = 'bhyve.manualRunCapMinutes';
 const DEFAULT_MANUAL_RUN_CAP_MINUTES = 60;
 const CONTROLLER_TABS = new Set(['dashboard', 'history', 'programs', 'events', 'logs', 'settings']);
+const DIAGNOSTIC_ANNOUNCEMENT_MS = 4_000;
+
+let diagnosticsAnnouncementTimer = null;
 
 const state = {
   appToken: '',
@@ -1966,6 +1970,9 @@ function resumeLogUpdates() {
   state.logPauseReason = null;
   state.displayedLogs = state.logs;
   state.pendingLogCount = 0;
+  // Recreating an expanded <details> queues a native toggle event that would
+  // immediately pause the freshly resumed stream. Explicit resume ends inspection.
+  state.openLogPayloadIds.clear();
   renderLogs();
   if (els.logsList) els.logsList.scrollTop = 0;
   announceDiagnostic('Live log updates resumed at the latest entry.');
@@ -1983,7 +1990,6 @@ function updateLogControls() {
   }
   if (els.logModeButton) {
     els.logModeButton.textContent = state.logMode === 'live' ? 'Pause' : 'Resume live';
-    els.logModeButton.setAttribute('aria-pressed', String(state.logMode === 'paused'));
   }
   if (els.pendingLogsButton) {
     const hasPendingLogs = state.pendingLogCount > 0;
@@ -2072,7 +2078,7 @@ function payloadPanel(label, payload) {
   return `
     <div class="payload-panel">
       <h3>${escapeHtml(label)}</h3>
-      <pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
+      <pre>${escapeHtml(formatDiagnosticValue(payload))}</pre>
     </div>
   `;
 }
@@ -2446,20 +2452,35 @@ function fallbackCopyText(text) {
   return copied;
 }
 
-function announceDiagnostic(message) {
+function announceDiagnostic(message, { error = false } = {}) {
   const target = els.statusDialog?.open
     ? els.statusRetryMessage
     : els.diagnosticsAnnouncement;
   if (!target) return;
+
+  if (target === els.diagnosticsAnnouncement) {
+    clearTimeout(diagnosticsAnnouncementTimer);
+    target.classList.remove('is-visible', 'error');
+  }
   target.textContent = '';
   window.requestAnimationFrame(() => {
     target.textContent = message;
+    if (target === els.diagnosticsAnnouncement) {
+      target.classList.toggle('error', error);
+      target.classList.add('is-visible');
+    }
   });
+
+  if (target === els.diagnosticsAnnouncement) {
+    diagnosticsAnnouncementTimer = window.setTimeout(() => {
+      target.classList.remove('is-visible');
+    }, DIAGNOSTIC_ANNOUNCEMENT_MS);
+  }
 }
 
 function announceDiagnosticError(error) {
   console.error(error);
-  announceDiagnostic(error.message || 'The diagnostic action failed.');
+  announceDiagnostic(error.message || 'The diagnostic action failed.', { error: true });
 }
 
 function showError(error) {
