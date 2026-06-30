@@ -101,10 +101,27 @@ test('local HTTP service proves its identity without disclosing APP_TOKEN', { ti
     proof: createControllerProof(appToken, challenge, 'identity'),
   });
 
+  const logsAfterSuccessfulProbe = await getJson(`http://127.0.0.1:${port}/api/logs`);
+  assert.equal(
+    logsAfterSuccessfulProbe.data.logs.some((entry) => entry.path?.startsWith('/api/identity')),
+    false,
+    'successful wrapper identity probes must not flood user-visible logs',
+  );
+
   const invalidIdentity = await getJson(
     `http://127.0.0.1:${port}/api/identity?challenge=invalid`,
   );
   assert.equal(invalidIdentity.response.status, 400);
+
+  const logsAfterFailedProbe = await getJson(`http://127.0.0.1:${port}/api/logs`);
+  const failedProbe = logsAfterFailedProbe.data.logs.find((entry) => entry.path?.startsWith('/api/identity'));
+  assert.equal(failedProbe?.status, 400);
+  assert.equal(failedProbe?.ok, false);
+  assert.equal(failedProbe?.path, '/api/identity?challenge=%5Bredacted%5D');
+  assert.equal(failedProbe?.response?.challenge, '[redacted]');
+  assert.equal(failedProbe?.response?.proof, '[redacted]');
+  assert.match(failedProbe?.response?.error || '', /challenge must be a 32-byte base64url value/);
+  assert.doesNotMatch(JSON.stringify(failedProbe), /challenge=invalid/);
 
   const wrongPurpose = await fetch(`http://127.0.0.1:${port}/api/shutdown`, {
     method: 'POST',

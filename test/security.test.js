@@ -233,6 +233,7 @@ test('program update helpers distinguish preserved Orbit fields from mutable UI 
 
 test('watering history requests encode device id and pagination', async () => {
   const requests = [];
+  const logs = [];
   const client = new OrbitClient({
     email: 'person@example.com',
     password: 'secret',
@@ -243,6 +244,7 @@ test('watering history requests encode device id and pagination', async () => {
   });
   client.apiKey = 'api-key';
   client.token = 'api-key';
+  client.on('request-log', (entry) => logs.push(entry));
 
   await client.wateringEvents('device/1', { page: 3, perPage: 50 });
 
@@ -251,10 +253,14 @@ test('watering history requests encode device id and pagination', async () => {
   assert.equal(url.pathname, '/v1/watering_events/device%2F1');
   assert.equal(url.searchParams.get('page'), '3');
   assert.equal(url.searchParams.get('per-page'), '50');
+  assert.equal(logs.length, 1);
+  assert.match(logs[0].path, /^\/v1\/watering_events\/\[redacted\]\?/);
+  assert.doesNotMatch(JSON.stringify(logs[0]), /device%2F1|device\/1/);
 });
 
 test('manual zone commands send Orbit websocket change-mode payloads', () => {
   const sent = [];
+  const logs = [];
   class FakeWebSocket {}
   FakeWebSocket.OPEN = 1;
   const client = new OrbitClient({
@@ -266,6 +272,7 @@ test('manual zone commands send Orbit websocket change-mode payloads', () => {
     readyState: FakeWebSocket.OPEN,
     send: (payload) => sent.push(JSON.parse(payload)),
   };
+  client.on('request-log', (entry) => logs.push(entry));
 
   client.startZone({ deviceId: 'device-1', station: 3, minutes: 10 });
   client.stopZone({ deviceId: 'device-1' });
@@ -284,6 +291,66 @@ test('manual zone commands send Orbit websocket change-mode payloads', () => {
   });
   assert.ok(Number.isFinite(Date.parse(sent[0].timestamp)));
   assert.ok(Number.isFinite(Date.parse(sent[1].timestamp)));
+  assert.equal(logs.length, 2);
+  assert.equal(logs[0].request.device_id, '[redacted]');
+  assert.equal(logs[0].request.stations, '[redacted]');
+  assert.doesNotMatch(JSON.stringify(logs), /device-1/);
+});
+
+test('a replaced websocket cannot stop the current Orbit stream', () => {
+  class FakeWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static instances = [];
+
+    constructor() {
+      this.readyState = FakeWebSocket.CONNECTING;
+      this.listeners = new Map();
+      this.sent = [];
+      FakeWebSocket.instances.push(this);
+    }
+
+    addEventListener(name, listener) {
+      const listeners = this.listeners.get(name) || [];
+      listeners.push(listener);
+      this.listeners.set(name, listeners);
+    }
+
+    emit(name, event = {}) {
+      for (const listener of this.listeners.get(name) || []) listener(event);
+    }
+
+    send(payload) {
+      this.sent.push(JSON.parse(payload));
+    }
+
+    close() {
+      this.readyState = FakeWebSocket.CLOSING;
+    }
+  }
+
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    WebSocketImpl: FakeWebSocket,
+  });
+  client.token = 'session-token';
+
+  client.connectStream();
+  const first = FakeWebSocket.instances[0];
+  client.restartStream();
+  const replacement = FakeWebSocket.instances[1];
+  replacement.readyState = FakeWebSocket.OPEN;
+  replacement.emit('open');
+
+  assert.equal(client.streamConnected, true);
+  assert.equal(client.ws, replacement);
+  first.emit('close');
+  assert.equal(client.streamConnected, true);
+  assert.equal(client.ws, replacement);
+
+  client.closeStream();
 });
 
 test('program start requires and sends the runnable Orbit program key', () => {
