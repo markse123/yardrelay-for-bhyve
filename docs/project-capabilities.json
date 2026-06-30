@@ -7,10 +7,15 @@
       "id": "local-dashboard",
       "title": "Local dashboard",
       "summary": "View controllers, zones, active watering, upcoming schedules, watering history, events, and sanitized logs in one local interface.",
-      "details": [],
+      "details": [
+        "Pause live logs automatically while selecting text or inspecting older entries, then resume at the latest entry.",
+        "Copy sanitized log entries and responses, and open controller status details with a user-triggered one-time retry."
+      ],
       "evidence": [
         "public/index.html",
         "public/app.js",
+        "public/diagnostics.js",
+        "public/styles.css",
         "server/app.js"
       ]
     },

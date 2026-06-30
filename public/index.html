@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>YardRelay</title>
-    <link rel="stylesheet" href="/styles.css?v=20260623-yard-runs">
+    <link rel="stylesheet" href="/styles.css?v=20260630-stable-diagnostics">
   </head>
   <body>
     <div class="app-shell">
@@ -17,7 +17,13 @@
           <h1 class="brand-logo">Yard<span>Relay</span></h1>
         </div>
         <div class="status-strip">
-          <span id="connectionBadge" class="badge">Starting</span>
+          <button id="connectionBadge"
+                  class="badge status-button"
+                  type="button"
+                  aria-haspopup="dialog"
+                  aria-controls="statusDialog"
+                  aria-expanded="false"
+                  aria-label="View controller status details">Starting</button>
           <span id="refreshStamp" class="muted">No refresh yet</span>
           <button id="unlockButton" class="secondary" type="button" hidden>Unlock writes</button>
           <button id="refreshButton" class="secondary">Refresh</button>
@@ -100,7 +106,10 @@
               <p>Sanitized local API, Orbit REST, and websocket traffic.</p>
             </div>
             <div class="logs-toolbar">
-              <span id="logCount" class="badge">0 entries</span>
+              <span id="logCount" class="badge log-count">0 entries</span>
+              <span id="logModeBadge" class="badge ok log-mode-badge">Live</span>
+              <button id="logModeButton" class="secondary compact-button log-mode-button" type="button">Pause</button>
+              <button id="pendingLogsButton" class="secondary compact-button pending-logs-button is-hidden" type="button" aria-hidden="true" disabled>Show latest</button>
               <select id="logFilter" class="select-input compact" aria-label="Log filter">
                 <option value="all">All traffic</option>
                 <option value="local">Local API</option>
@@ -110,7 +119,7 @@
               </select>
             </div>
           </div>
-          <div id="logsList" class="logs-list"></div>
+          <div id="logsList" class="logs-list" role="region" aria-label="Request log entries" tabindex="0"></div>
         </section>
 
         <section id="settingsTab" class="tab-panel" hidden>
@@ -144,6 +153,51 @@
       </main>
     </div>
 
+    <dialog id="statusDialog" class="status-dialog" aria-labelledby="statusDialogTitle">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">Controller status</p>
+          <h2 id="statusDialogTitle">Status details</h2>
+        </div>
+        <button id="statusCloseButton" class="secondary compact-button" type="button" aria-label="Close status details">Close</button>
+      </div>
+      <p id="statusSummary" class="status-summary">Checking the local controller.</p>
+      <dl class="status-detail-list">
+        <div>
+          <dt>Configuration</dt>
+          <dd id="statusConfigured">Checking</dd>
+        </div>
+        <div>
+          <dt>Orbit API</dt>
+          <dd id="statusAuthenticated">Checking</dd>
+        </div>
+        <div>
+          <dt>Event stream</dt>
+          <dd id="statusStream">Checking</dd>
+        </div>
+        <div>
+          <dt>Last refresh</dt>
+          <dd id="statusLastRefresh">Not refreshed</dd>
+        </div>
+        <div>
+          <dt>Error time</dt>
+          <dd id="statusErrorTime">No current error</dd>
+        </div>
+      </dl>
+      <section id="statusErrorPanel" class="status-error-panel" aria-labelledby="statusErrorHeading" hidden>
+        <h3 id="statusErrorHeading">Technical details</h3>
+        <pre id="statusTechnicalDetail" tabindex="0"></pre>
+      </section>
+      <p id="statusRetryMessage" class="muted" role="status" aria-live="polite"></p>
+      <div class="dialog-actions">
+        <button id="statusCopyButton" class="secondary" type="button">Copy details</button>
+        <button id="statusShowLogsButton" class="secondary" type="button">Show error logs</button>
+        <button id="statusRetryButton" class="primary" type="button">Retry once</button>
+      </div>
+    </dialog>
+
+    <p id="diagnosticsAnnouncement" class="diagnostics-toast" role="status" aria-live="polite" aria-atomic="true"></p>
+
     <template id="emptyTemplate">
       <div class="empty-state">
         <h3>No data yet</h3>
@@ -151,6 +205,6 @@
       </div>
     </template>
 
-    <script src="/app.js?v=20260628-write-access-help" type="module"></script>
+    <script src="/app.js?v=20260630-stable-diagnostics" type="module"></script>
   </body>
 </html>

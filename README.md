@@ -12,6 +12,8 @@ The supported deployment is same-computer, loopback-only use—not LAN or public
 
 <!-- BEGIN GENERATED:CAPABILITIES -->
 - **Local dashboard:** View controllers, zones, active watering, upcoming schedules, watering history, events, and sanitized logs in one local interface.
+  - Pause live logs automatically while selecting text or inspecting older entries, then resume at the latest entry.
+  - Copy sanitized log entries and responses, and open controller status details with a user-triggered one-time retry.
 - **Manual watering:** Start and stop individual zones with configurable run-time caps and safeguards against conflicting known activity.
 - **Program controls:** Enable, disable, start, and edit supported fields on existing Orbit programs while keeping smart programs read-only.
   - Program changes are snapshotted locally before the Orbit API is updated.
