@@ -1,6 +1,20 @@
+import {
+  countNewLogEntries,
+  formatControllerStatusForClipboard,
+  formatDiagnosticValue,
+  formatLogEntryForClipboard,
+  formatLogResponseForClipboard,
+  mergeLogEntries,
+  normalizeLogEntries,
+  sanitizeDiagnosticText,
+} from './diagnostics.js';
+
 const MANUAL_RUN_CAP_STORAGE_KEY = 'bhyve.manualRunCapMinutes';
 const DEFAULT_MANUAL_RUN_CAP_MINUTES = 60;
 const CONTROLLER_TABS = new Set(['dashboard', 'history', 'programs', 'events', 'logs', 'settings']);
+const DIAGNOSTIC_ANNOUNCEMENT_MS = 4_000;
+
+let diagnosticsAnnouncementTimer = null;
 
 const state = {
   appToken: '',
@@ -13,8 +27,13 @@ const state = {
   maxRainDelayHours: 240,
   data: null,
   logs: [],
+  displayedLogs: [],
   logFilter: 'all',
-  openLogPayloadId: null,
+  logMode: 'live',
+  logPauseReason: null,
+  pendingLogCount: 0,
+  openLogPayloadIds: new Set(),
+  statusRetrying: false,
   history: null,
   historyHours: 184,
   maxHistoryHours: 184,
@@ -49,6 +68,24 @@ const els = {
   logsList: document.querySelector('#logsList'),
   logCount: document.querySelector('#logCount'),
   logFilter: document.querySelector('#logFilter'),
+  logModeBadge: document.querySelector('#logModeBadge'),
+  logModeButton: document.querySelector('#logModeButton'),
+  pendingLogsButton: document.querySelector('#pendingLogsButton'),
+  statusDialog: document.querySelector('#statusDialog'),
+  statusSummary: document.querySelector('#statusSummary'),
+  statusConfigured: document.querySelector('#statusConfigured'),
+  statusAuthenticated: document.querySelector('#statusAuthenticated'),
+  statusStream: document.querySelector('#statusStream'),
+  statusLastRefresh: document.querySelector('#statusLastRefresh'),
+  statusErrorTime: document.querySelector('#statusErrorTime'),
+  statusErrorPanel: document.querySelector('#statusErrorPanel'),
+  statusTechnicalDetail: document.querySelector('#statusTechnicalDetail'),
+  statusRetryMessage: document.querySelector('#statusRetryMessage'),
+  statusCopyButton: document.querySelector('#statusCopyButton'),
+  statusShowLogsButton: document.querySelector('#statusShowLogsButton'),
+  statusRetryButton: document.querySelector('#statusRetryButton'),
+  statusCloseButton: document.querySelector('#statusCloseButton'),
+  diagnosticsAnnouncement: document.querySelector('#diagnosticsAnnouncement'),
   manualCap: document.querySelector('#manualCap'),
   writeAccessMode: document.querySelector('#writeAccessMode'),
 };
@@ -95,6 +132,7 @@ async function init() {
   await loadLogs().catch((error) => {
     console.warn('Log loading is unavailable:', error);
     state.logs = [];
+    state.displayedLogs = [];
     renderLogs();
   });
   connectEvents();
@@ -123,6 +161,25 @@ function bindActions() {
   els.unlockButton?.addEventListener('click', () => {
     unlockWriteAccess().catch(showError);
   });
+
+  els.badge?.addEventListener('click', openStatusDialog);
+  els.statusDialog?.addEventListener('close', () => {
+    els.badge?.setAttribute('aria-expanded', 'false');
+  });
+  els.statusCloseButton?.addEventListener('click', () => els.statusDialog?.close());
+  els.statusCopyButton?.addEventListener('click', () => {
+    copyDiagnosticText(formatStatusForClipboard(), 'Status details').catch(announceDiagnosticError);
+  });
+  els.statusShowLogsButton?.addEventListener('click', showErrorLogs);
+  els.statusRetryButton?.addEventListener('click', retryStatusOnce);
+  els.logModeButton?.addEventListener('click', () => {
+    if (state.logMode === 'live') {
+      pauseLogUpdates('manual');
+    } else {
+      resumeLogUpdates();
+    }
+  });
+  els.pendingLogsButton?.addEventListener('click', resumeLogUpdates);
 
   els.refreshButton.addEventListener('click', async () => {
     els.refreshButton.disabled = true;
@@ -225,16 +282,33 @@ function bindActions() {
     renderHistory();
   });
 
-  els.logsList?.addEventListener('click', (event) => {
-    const summary = event.target.closest('summary');
-    if (!summary || !els.logsList.contains(summary)) return;
-    const details = summary.closest('.log-details[data-log-id]');
+  els.logsList?.addEventListener('scroll', () => {
+    if (els.logsList.scrollTop > 12) pauseLogUpdates('scroll');
+  }, { passive: true });
+  els.logsList?.addEventListener('selectstart', () => pauseLogUpdates('selection'));
+  els.logsList?.addEventListener('pointerdown', (event) => {
+    if (event.target.closest('.log-row')) pauseLogUpdates('inspection');
+  });
+  els.logsList?.addEventListener('focusin', (event) => {
+    if (event.target !== els.logsList) pauseLogUpdates('inspection');
+  });
+  els.logsList?.addEventListener('toggle', (event) => {
+    const details = event.target.closest?.('.log-details[data-log-id]');
     if (!details) return;
-
-    event.preventDefault();
-    const logId = details.dataset.logId;
-    state.openLogPayloadId = details.open ? null : logId;
-    renderLogs();
+    if (details.open) {
+      state.openLogPayloadIds.add(details.dataset.logId);
+      pauseLogUpdates('inspection');
+    } else {
+      state.openLogPayloadIds.delete(details.dataset.logId);
+    }
+  }, true);
+  els.logsList?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-copy-log]');
+    if (!button || !els.logsList.contains(button)) return;
+    copyLog(button).catch(announceDiagnosticError);
+  });
+  document.addEventListener('selectionchange', () => {
+    if (selectionTouchesLogs()) pauseLogUpdates('selection');
   });
 }
 
@@ -245,7 +319,9 @@ async function loadState() {
 
 async function loadLogs() {
   const data = await apiGet('/api/logs');
-  state.logs = data.logs || [];
+  state.logs = normalizeLogEntries(data.logs || []);
+  state.displayedLogs = state.logs;
+  state.pendingLogCount = 0;
   renderLogs();
 }
 
@@ -322,16 +398,11 @@ function connectEvents() {
   });
   source.addEventListener('request-log', (event) => {
     const nextLog = JSON.parse(event.data);
-    state.logs = [
-      nextLog,
-      ...state.logs.filter((log) => log.id !== nextLog.id),
-    ].slice(0, 250);
-    renderLogs();
+    receiveLogEntries([nextLog]);
   });
   source.addEventListener('request-logs', (event) => {
     const data = JSON.parse(event.data);
-    state.logs = data.logs || [];
-    renderLogs();
+    receiveLogSnapshot(data.logs || []);
   });
 }
 
@@ -346,12 +417,11 @@ function render() {
   renderYardRunPanel();
   renderPrograms();
   renderEvents();
-  renderLogs();
 }
 
 function renderStatus() {
   const status = state.data.status || {};
-  els.badge.className = 'badge';
+  els.badge.className = 'badge status-button';
   if (!status.configured) {
     els.badge.textContent = 'Missing .env';
     els.badge.classList.add('warn');
@@ -368,9 +438,129 @@ function renderStatus() {
     els.badge.textContent = 'Disconnected';
     els.badge.classList.add('warn');
   }
+  els.badge.setAttribute('aria-label', `${controllerStatusSummary(status)} View status details.`);
+  els.badge.title = 'View controller status details';
   els.refreshStamp.textContent = status.lastRefresh
     ? `Last refresh ${formatDateTime(status.lastRefresh)}`
     : 'No refresh yet';
+  renderStatusDialog();
+}
+
+function openStatusDialog() {
+  if (!els.statusDialog) return;
+  renderStatusDialog();
+  els.statusRetryMessage.textContent = '';
+  if (!els.statusDialog.open) {
+    els.badge?.setAttribute('aria-expanded', 'true');
+    els.statusDialog.showModal();
+  }
+}
+
+function renderStatusDialog() {
+  if (!els.statusDialog) return;
+  const status = state.data?.status || {};
+  const summary = controllerStatusSummary(status);
+  els.statusSummary.textContent = summary;
+  const statusLoaded = Object.hasOwn(status, 'configured');
+  els.statusConfigured.textContent = statusLoaded
+    ? (status.configured ? 'Credentials configured' : 'Orbit credentials missing')
+    : 'Checking';
+  els.statusAuthenticated.textContent = statusLoaded
+    ? (status.authenticated ? 'Authenticated' : 'Not authenticated')
+    : 'Checking';
+  els.statusStream.textContent = statusLoaded
+    ? (status.streamConnected ? 'Connected' : 'Disconnected')
+    : 'Checking';
+  els.statusLastRefresh.textContent = status.lastRefresh ? formatStatusDateTime(status.lastRefresh) : 'Not refreshed';
+  els.statusErrorTime.textContent = status.lastErrorAt ? formatStatusDateTime(status.lastErrorAt) : 'No current error';
+
+  const technicalDetail = statusTechnicalDetail(status);
+  els.statusErrorPanel.hidden = !technicalDetail;
+  els.statusTechnicalDetail.textContent = technicalDetail;
+  const hasErrorLogs = state.logs.some((log) => log.ok === false || log.level === 'error');
+  els.statusShowLogsButton.disabled = !status.lastError && !hasErrorLogs;
+  els.statusRetryButton.hidden = !statusLoaded
+    || !status.configured
+    || Boolean(status.authenticated && status.streamConnected && !status.lastError);
+  els.statusRetryButton.disabled = state.statusRetrying;
+}
+
+function controllerStatusSummary(status) {
+  if (!Object.hasOwn(status, 'configured')) {
+    return 'Checking the local controller status.';
+  }
+  if (!status.configured) {
+    return 'Orbit credentials are missing. Add them in local setup, then start or restart the controller.';
+  }
+  if (status.lastError) {
+    const detail = `${status.lastErrorContext || ''} ${status.lastError}`.toLowerCase();
+    if (detail.includes('401') || detail.includes('not authorized')) {
+      return 'Orbit rejected the saved credentials. Check the email and password, then use Retry once.';
+    }
+    return 'The controller reported an error. Review the technical details below, then retry when ready.';
+  }
+  if (status.authenticated && status.streamConnected) {
+    return 'The controller is authenticated and receiving Orbit events.';
+  }
+  if (status.authenticated) {
+    return 'The Orbit API is connected, but the event stream is not currently connected.';
+  }
+  return 'The local controller is running, but it is not authenticated with Orbit.';
+}
+
+function statusTechnicalDetail(status) {
+  if (!status.lastError) return '';
+  return [
+    status.lastErrorContext ? `Context: ${status.lastErrorContext}` : null,
+    `Detail: ${status.lastError}`,
+  ].filter(Boolean).join('\n');
+}
+
+function formatStatusForClipboard() {
+  const status = state.data?.status || {};
+  return formatControllerStatusForClipboard(status, controllerStatusSummary(status));
+}
+
+function showErrorLogs() {
+  state.displayedLogs = state.logs;
+  state.pendingLogCount = 0;
+  state.logMode = 'paused';
+  state.logPauseReason = 'inspection';
+  state.logFilter = 'error';
+  if (els.logFilter) els.logFilter.value = 'error';
+  els.statusDialog?.close();
+  window.requestAnimationFrame(() => {
+    showTab('logs');
+    renderLogs();
+    if (els.logsList) {
+      els.logsList.scrollTop = 0;
+      els.logsList.focus();
+    }
+    announceDiagnostic('Showing error logs with live updates paused.');
+  });
+}
+
+async function retryStatusOnce() {
+  if (state.statusRetrying) return;
+  const previousErrorAt = state.data?.status?.lastErrorAt || null;
+  state.statusRetrying = true;
+  els.statusRetryButton.disabled = true;
+  els.statusRetryMessage.textContent = 'Trying the Orbit connection once...';
+  try {
+    state.data = await apiPost('/api/reconnect', {});
+    render();
+    els.statusRetryMessage.textContent = 'The one-time retry succeeded.';
+  } catch (error) {
+    await loadState().catch(() => {});
+    const currentStatus = state.data?.status || {};
+    const detail = currentStatus.lastErrorAt && currentStatus.lastErrorAt !== previousErrorAt
+      ? currentStatus.lastError
+      : error.message;
+    els.statusRetryMessage.textContent = `The one-time retry failed: ${sanitizeDiagnosticText(detail)}`;
+  } finally {
+    state.statusRetrying = false;
+    renderStatusDialog();
+  }
 }
 
 function renderSummary() {
@@ -1733,26 +1923,115 @@ function renderEvents() {
   `).join('');
 }
 
+function receiveLogEntries(entries) {
+  pauseLogUpdatesForCurrentViewport();
+  state.logs = mergeLogEntries(state.logs, entries);
+  if (state.logMode === 'live') {
+    state.displayedLogs = state.logs;
+    state.pendingLogCount = 0;
+    renderLogs();
+    return;
+  }
+  updatePendingLogCount();
+}
+
+function receiveLogSnapshot(entries) {
+  pauseLogUpdatesForCurrentViewport();
+  state.logs = normalizeLogEntries(entries);
+  if (state.logMode === 'live') {
+    state.displayedLogs = state.logs;
+    state.pendingLogCount = 0;
+    renderLogs();
+    return;
+  }
+  updatePendingLogCount();
+}
+
+function pauseLogUpdatesForCurrentViewport() {
+  if (state.logMode === 'live' && Number(els.logsList?.scrollTop || 0) > 12) {
+    pauseLogUpdates('scroll');
+  }
+}
+
+function pauseLogUpdates(reason = 'manual') {
+  const changed = state.logMode !== 'paused';
+  state.logMode = 'paused';
+  state.logPauseReason = reason;
+  updatePendingLogCount();
+  if (changed) {
+    announceDiagnostic(reason === 'scroll'
+      ? 'Live log updates paused while you inspect older entries.'
+      : 'Live log updates paused for inspection.');
+  }
+}
+
+function resumeLogUpdates() {
+  state.logMode = 'live';
+  state.logPauseReason = null;
+  state.displayedLogs = state.logs;
+  state.pendingLogCount = 0;
+  // Recreating an expanded <details> queues a native toggle event that would
+  // immediately pause the freshly resumed stream. Explicit resume ends inspection.
+  state.openLogPayloadIds.clear();
+  renderLogs();
+  if (els.logsList) els.logsList.scrollTop = 0;
+  announceDiagnostic('Live log updates resumed at the latest entry.');
+}
+
+function updatePendingLogCount() {
+  state.pendingLogCount = countNewLogEntries(state.displayedLogs, state.logs);
+  updateLogControls();
+}
+
+function updateLogControls() {
+  if (els.logModeBadge) {
+    els.logModeBadge.className = `badge log-mode-badge ${state.logMode === 'live' ? 'ok' : 'warn'}`;
+    els.logModeBadge.textContent = state.logMode === 'live' ? 'Live' : 'Paused';
+  }
+  if (els.logModeButton) {
+    els.logModeButton.textContent = state.logMode === 'live' ? 'Pause' : 'Resume live';
+  }
+  if (els.pendingLogsButton) {
+    const hasPendingLogs = state.pendingLogCount > 0;
+    els.pendingLogsButton.classList.toggle('is-hidden', !hasPendingLogs);
+    els.pendingLogsButton.disabled = !hasPendingLogs;
+    els.pendingLogsButton.setAttribute('aria-hidden', String(!hasPendingLogs));
+    els.pendingLogsButton.textContent = state.pendingLogCount === 1
+      ? 'Show 1 new entry'
+      : `Show ${state.pendingLogCount} new entries`;
+  }
+}
+
 function renderLogs() {
   if (!els.logsList) return;
-  const logs = filterLogs(state.logs || []);
-  els.logCount.textContent = `${state.logs.length} entr${state.logs.length === 1 ? 'y' : 'ies'}`;
+  const retainedLogs = state.displayedLogs || [];
+  const logs = filterLogs(retainedLogs);
+  els.logCount.textContent = state.logFilter === 'all'
+    ? `${retainedLogs.length} entr${retainedLogs.length === 1 ? 'y' : 'ies'}`
+    : `${logs.length} of ${retainedLogs.length}`;
+  updateLogControls();
   if (logs.length === 0) {
     els.logsList.innerHTML = emptyState();
     return;
   }
   els.logsList.innerHTML = logs.map((log) => `
-    <article class="log-row ${log.ok === false ? 'error' : ''}">
+    <article class="log-row ${log.ok === false ? 'error' : ''}" data-log-id="${escapeAttr(log.id || '')}">
       <div class="log-head">
         <time>${escapeHtml(formatLogTime(log.at))}</time>
         <span class="log-pill ${escapeAttr(log.source || 'local')}">${escapeHtml(log.source || 'local')}</span>
         <span class="log-pill">${escapeHtml(formatLogKind(log))}</span>
         ${log.status ? `<span class="log-status ${log.ok === false ? 'error' : 'ok'}">${escapeHtml(log.status)}</span>` : ''}
         ${Number.isFinite(log.durationMs) ? `<span class="log-duration">${escapeHtml(log.durationMs)}ms</span>` : ''}
+        <span class="log-actions">
+          <button class="secondary log-copy-button" type="button" data-copy-log="entry" data-log-id="${escapeAttr(log.id || '')}" aria-label="Copy entry for ${escapeAttr(formatLogAccessibleLabel(log))}">Copy entry</button>
+          ${log.response !== undefined && log.response !== null
+            ? `<button class="secondary log-copy-button" type="button" data-copy-log="response" data-log-id="${escapeAttr(log.id || '')}" aria-label="Copy response for ${escapeAttr(formatLogAccessibleLabel(log))}">Copy response</button>`
+            : ''}
+        </span>
       </div>
       <div class="log-path">${escapeHtml(formatLogTitle(log))}</div>
       ${log.client ? `<div class="log-client">client ${escapeHtml(log.client)}</div>` : ''}
-      ${log.request || log.response ? logPayload(log) : ''}
+      ${hasLogPayload(log) ? logPayload(log) : ''}
     </article>
   `).join('');
 }
@@ -1777,15 +2056,19 @@ function formatLogTitle(log) {
   return log.message || log.kind || 'log';
 }
 
+function formatLogAccessibleLabel(log) {
+  return `${formatLogTitle(log)} at ${formatLogTime(log.at)}`;
+}
+
 function logPayload(log) {
   const logId = String(log.id || '');
-  const isOpen = logId && state.openLogPayloadId === logId;
+  const isOpen = logId && state.openLogPayloadIds.has(logId);
   return `
     <details class="log-details" data-log-id="${escapeAttr(logId)}"${isOpen ? ' open' : ''}>
       <summary>Payload</summary>
       <div class="payload-grid">
-        ${log.request ? payloadPanel('Request', log.request) : ''}
-        ${log.response ? payloadPanel('Response', log.response) : ''}
+        ${log.request !== undefined && log.request !== null ? payloadPanel('Request', log.request) : ''}
+        ${log.response !== undefined && log.response !== null ? payloadPanel('Response', log.response) : ''}
       </div>
     </details>
   `;
@@ -1795,9 +2078,32 @@ function payloadPanel(label, payload) {
   return `
     <div class="payload-panel">
       <h3>${escapeHtml(label)}</h3>
-      <pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
+      <pre>${escapeHtml(formatDiagnosticValue(payload))}</pre>
     </div>
   `;
+}
+
+function hasLogPayload(log) {
+  return (log.request !== undefined && log.request !== null)
+    || (log.response !== undefined && log.response !== null);
+}
+
+async function copyLog(button) {
+  const log = state.displayedLogs.find((entry) => String(entry.id || '') === button.dataset.logId);
+  if (!log) throw new Error('That log entry is no longer available.');
+  const responseOnly = button.dataset.copyLog === 'response';
+  const text = responseOnly
+    ? formatLogResponseForClipboard(log)
+    : formatLogEntryForClipboard(log);
+  if (!text) throw new Error(responseOnly ? 'This entry has no response to copy.' : 'This entry cannot be copied.');
+  await copyDiagnosticText(text, responseOnly ? 'Log response' : 'Log entry');
+}
+
+function selectionTouchesLogs() {
+  const selection = window.getSelection?.();
+  if (!selection || selection.isCollapsed || !els.logsList) return false;
+  return [selection.anchorNode, selection.focusNode]
+    .some((node) => node && els.logsList.contains(node));
 }
 
 function metric(label, value) {
@@ -2098,6 +2404,85 @@ function renderWriteAccessMode() {
   els.writeAccessMode.textContent = labels[state.writeAccessMode] || state.writeAccessMode;
 }
 
+async function copyDiagnosticText(text, label) {
+  if (!text) throw new Error(`${label} is empty.`);
+  let copied = false;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch {
+      // Embedded webviews can deny the Clipboard API; use the local selection fallback.
+    }
+  }
+  if (!copied) copied = fallbackCopyText(text);
+  if (!copied) throw new Error(`Could not copy ${label.toLowerCase()}.`);
+  announceDiagnostic(`${label} copied.`);
+}
+
+function fallbackCopyText(text) {
+  const selection = window.getSelection?.();
+  const activeElement = document.activeElement;
+  const savedRanges = selection
+    ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange())
+    : [];
+  const textarea = document.createElement('textarea');
+  const copyContainer = els.statusDialog?.open ? els.statusDialog : document.body;
+  let copied = false;
+  try {
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.setAttribute('aria-hidden', 'true');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    copyContainer.append(textarea);
+    textarea.select();
+    copied = document.execCommand('copy');
+  } catch {
+    copied = false;
+  } finally {
+    textarea.remove();
+    activeElement?.focus?.({ preventScroll: true });
+    if (selection && savedRanges.length > 0) {
+      selection.removeAllRanges();
+      for (const range of savedRanges) selection.addRange(range);
+    }
+  }
+  return copied;
+}
+
+function announceDiagnostic(message, { error = false } = {}) {
+  const target = els.statusDialog?.open
+    ? els.statusRetryMessage
+    : els.diagnosticsAnnouncement;
+  if (!target) return;
+
+  if (target === els.diagnosticsAnnouncement) {
+    clearTimeout(diagnosticsAnnouncementTimer);
+    target.classList.remove('is-visible', 'error');
+  }
+  target.textContent = '';
+  window.requestAnimationFrame(() => {
+    target.textContent = message;
+    if (target === els.diagnosticsAnnouncement) {
+      target.classList.toggle('error', error);
+      target.classList.add('is-visible');
+    }
+  });
+
+  if (target === els.diagnosticsAnnouncement) {
+    diagnosticsAnnouncementTimer = window.setTimeout(() => {
+      target.classList.remove('is-visible');
+    }, DIAGNOSTIC_ANNOUNCEMENT_MS);
+  }
+}
+
+function announceDiagnosticError(error) {
+  console.error(error);
+  announceDiagnostic(error.message || 'The diagnostic action failed.', { error: true });
+}
+
 function showError(error) {
   console.error(error);
   window.alert(error.message);
@@ -2116,6 +2501,18 @@ function formatDateTime(value) {
     day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
+  }).format(new Date(value));
+}
+
+function formatStatusDateTime(value) {
+  if (!value) return 'n/a';
+  return new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
   }).format(new Date(value));
 }
 

@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import test from 'node:test';
 
-import { OrbitClient, PROGRAM_MUTABLE_KEYS, pickProgramMutableFields, pickProgramUpdateFields } from '../server/orbit-client.js';
+import {
+  OrbitClient,
+  PROGRAM_MUTABLE_KEYS,
+  pickProgramMutableFields,
+  pickProgramUpdateFields,
+  sanitizeDiagnosticLogEntry,
+} from '../server/orbit-client.js';
 import {
   buildTrustedHosts,
   isLoopbackAddress,
@@ -233,6 +239,7 @@ test('program update helpers distinguish preserved Orbit fields from mutable UI 
 
 test('watering history requests encode device id and pagination', async () => {
   const requests = [];
+  const logs = [];
   const client = new OrbitClient({
     email: 'person@example.com',
     password: 'secret',
@@ -243,6 +250,7 @@ test('watering history requests encode device id and pagination', async () => {
   });
   client.apiKey = 'api-key';
   client.token = 'api-key';
+  client.on('request-log', (entry) => logs.push(entry));
 
   await client.wateringEvents('device/1', { page: 3, perPage: 50 });
 
@@ -251,10 +259,294 @@ test('watering history requests encode device id and pagination', async () => {
   assert.equal(url.pathname, '/v1/watering_events/device%2F1');
   assert.equal(url.searchParams.get('page'), '3');
   assert.equal(url.searchParams.get('per-page'), '50');
+  assert.equal(logs.length, 1);
+  assert.match(logs[0].path, /^\/v1\/watering_events\/\[redacted\]\?/);
+  assert.doesNotMatch(JSON.stringify(logs[0]), /device%2F1|device\/1/);
+});
+
+test('Orbit requests time out with a sanitized bounded failure log', async () => {
+  const logs = [];
+  let requestSignal = null;
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    requestTimeoutMs: 25,
+    fetchImpl: async (_url, { signal }) => {
+      requestSignal = signal;
+      return await new Promise(() => {});
+    },
+  });
+  client.apiKey = 'api-key';
+  client.token = 'api-key';
+  client.on('request-log', (entry) => logs.push(entry));
+
+  await assert.rejects(
+    () => client.wateringEvents('private-device-id', { page: 1, perPage: 10 }),
+    (error) => {
+      assert.equal(error.code, 'ORBIT_REQUEST_TIMEOUT');
+      assert.match(error.message, /timed out after 25ms/);
+      assert.doesNotMatch(error.message, /private-device-id|private-data|Users\/example/);
+      return true;
+    },
+  );
+
+  assert.equal(logs.length, 1);
+  assert.equal(requestSignal?.aborted, true);
+  assert.equal(logs[0].ok, false);
+  assert.match(logs[0].path, /^\/v1\/watering_events\/\[redacted\]\?/);
+  assert.match(logs[0].response.error, /timed out after 25ms/);
+  assert.doesNotMatch(JSON.stringify(logs[0]), /private-device-id|private-data|Users\/example/);
+});
+
+test('Orbit request timeout configuration has a strict upper bound', () => {
+  assert.doesNotThrow(() => new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    requestTimeoutMs: 120_000,
+  }));
+  assert.throws(
+    () => new OrbitClient({
+      email: 'person@example.com',
+      password: 'secret',
+      requestTimeoutMs: 120_001,
+    }),
+    /integer from 1 to 120000/,
+  );
+});
+
+test('Orbit timeout also bounds a response body that never settles', async () => {
+  const logs = [];
+  let requestSignal = null;
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    requestTimeoutMs: 25,
+    fetchImpl: async (_url, { signal }) => {
+      requestSignal = signal;
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return await new Promise(() => {});
+        },
+      };
+    },
+  });
+  client.apiKey = 'api-key';
+  client.token = 'api-key';
+  client.on('request-log', (entry) => logs.push(entry));
+
+  await assert.rejects(
+    () => client.updateProgram('private-program-id', { enabled: true }),
+    (error) => error?.code === 'ORBIT_REQUEST_TIMEOUT' && /timed out after 25ms/.test(error.message),
+  );
+
+  assert.equal(requestSignal?.aborted, true);
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].status, 200);
+  assert.equal(logs[0].ok, false);
+  assert.match(logs[0].path, /^\/v1\/sprinkler_timer_programs\/\[redacted\]$/);
+  assert.match(logs[0].response.error, /timed out after 25ms/);
+  assert.doesNotMatch(JSON.stringify(logs[0]), /private-program-id/);
+});
+
+test('Orbit log paths preserve numeric diagnostics and redact every other query value', async () => {
+  const logs = [];
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    fetchImpl: async () => new Response('{"message":"rejected"}', { status: 400 }),
+  });
+  client.apiKey = 'api-key';
+  client.token = 'api-key';
+  client.on('request-log', (entry) => logs.push(entry));
+
+  await assert.rejects(
+    () => client.requestRaw('/v1/custom?t=123&page=2&hours=4&device=private-device&note=private-address'),
+    /Orbit GET \/v1\/custom/,
+  );
+
+  assert.equal(logs.length, 1);
+  assert.equal(
+    logs[0].path,
+    '/v1/custom?t=123&page=2&hours=4&device=%5Bredacted%5D&note=%5Bredacted%5D',
+  );
+  assert.doesNotMatch(JSON.stringify(logs[0]), /private-device|private-address/);
+});
+
+test('Orbit transport errors redact embedded path queries without mangling prose', async () => {
+  const logs = [];
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    fetchImpl: async () => {
+      throw new Error('Retry? fetch failed /v1/custom?note=PrivateResident');
+    },
+  });
+  client.apiKey = 'api-key';
+  client.token = 'api-key';
+  client.on('request-log', (entry) => logs.push(entry));
+
+  await assert.rejects(
+    () => client.requestRaw('/v1/custom'),
+    (error) => error.message.includes('Retry?') && !error.message.includes('PrivateResident'),
+  );
+  assert.equal(logs.length, 1);
+  assert.match(logs[0].response.error, /Retry\?/);
+  assert.match(logs[0].response.error, /note=%5Bredacted%5D/);
+  assert.doesNotMatch(JSON.stringify(logs[0]), /PrivateResident/);
+});
+
+test('Orbit transport errors with hostile message getters still emit a safe request log', async () => {
+  const logs = [];
+  const rejectedValue = {};
+  Object.defineProperty(rejectedValue, 'message', {
+    get() {
+      throw new Error('raw getter detail');
+    },
+  });
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    fetchImpl: async () => {
+      throw rejectedValue;
+    },
+  });
+  client.apiKey = 'api-key';
+  client.token = 'api-key';
+  client.on('request-log', (entry) => logs.push(entry));
+
+  await assert.rejects(
+    () => client.requestRaw('/v1/custom'),
+    (error) => error.message.includes('request failed') && !error.message.includes('raw getter detail'),
+  );
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].response.error, 'request failed');
+  assert.doesNotMatch(JSON.stringify(logs[0]), /raw getter detail/);
+});
+
+test('diagnostic log normalization preserves operations while dropping raw private fields', () => {
+  const normalized = sanitizeDiagnosticLogEntry({
+    id: 'log-123',
+    at: '2026-06-30T19:18:16.000Z',
+    source: 'orbit',
+    kind: 'http',
+    level: 'error',
+    method: 'put',
+    path: '/v1/sprinkler_timer_programs/private-program-id?email=person@example.com',
+    status: 500,
+    ok: false,
+    durationMs: 42,
+    client: '127.0.0.1',
+    error: 'Orbit PUT /v1/sprinkler_timer_programs/private-program-id failed password=private-password',
+    request: {
+      session: { email: 'person@example.com', password: 'private-password' },
+      device_id: 'private-device-id',
+    },
+    response: {
+      device_name: 'Private controller',
+      token: 'private-token',
+      message: 'request rejected',
+    },
+    headers: { authorization: 'Bearer private-token' },
+    rawEvent: { device_id: 'private-device-id' },
+  }, {
+    defaultId: 'fallback-id',
+    defaultAt: '2026-06-30T00:00:00.000Z',
+  });
+
+  assert.equal(normalized.id, 'log-123');
+  assert.equal(normalized.at, '2026-06-30T19:18:16.000Z');
+  assert.equal(normalized.source, 'orbit');
+  assert.equal(normalized.kind, 'http');
+  assert.equal(normalized.level, 'error');
+  assert.equal(normalized.method, 'PUT');
+  assert.equal(normalized.status, 500);
+  assert.equal(normalized.ok, false);
+  assert.equal(normalized.durationMs, 42);
+  assert.equal(normalized.client, '127.0.0.1');
+  assert.equal(Object.hasOwn(normalized, 'headers'), false);
+  assert.equal(Object.hasOwn(normalized, 'rawEvent'), false);
+  assert.doesNotMatch(
+    JSON.stringify(normalized),
+    /private-program-id|person@example\.com|private-password|private-device-id|Private controller|private-token/,
+  );
+  assert.match(normalized.path, /\/v1\/sprinkler_timer_programs\/\[redacted\]/);
+  assert.equal(normalized.response.message, 'request rejected');
+
+  const embeddedPath = sanitizeDiagnosticLogEntry({
+    id: 'log-embedded',
+    label: 'Retry? connection failed',
+    message: 'Retry? The controller is offline',
+    error: 'fetch failed /v1/custom?note=PrivateResident',
+  });
+  assert.equal(embeddedPath.label, 'Retry? connection failed');
+  assert.equal(embeddedPath.message, 'Retry? The controller is offline');
+  assert.match(embeddedPath.error, /note=%5Bredacted%5D/);
+  assert.doesNotMatch(JSON.stringify(embeddedPath), /PrivateResident/);
+});
+
+test('diagnostic log normalization is JSON-safe and distinguishes absent from null payloads', () => {
+  const cyclic = { count: 12n };
+  cyclic.self = cyclic;
+  const safe = sanitizeDiagnosticLogEntry({
+    id: 'log-safe',
+    response: cyclic,
+  });
+  assert.doesNotThrow(() => JSON.stringify(safe));
+  assert.equal(safe.response.count, '12');
+  assert.equal(safe.response.self, '[unavailable]');
+  assert.equal(Object.hasOwn(safe, 'request'), false);
+
+  const withNull = sanitizeDiagnosticLogEntry({
+    id: 'log-null',
+    request: null,
+    response: null,
+  });
+  assert.equal(Object.hasOwn(withNull, 'request'), true);
+  assert.equal(Object.hasOwn(withNull, 'response'), true);
+  assert.equal(withNull.request, null);
+  assert.equal(withNull.response, null);
+
+  let getterCalls = 0;
+  let toJsonCalls = 0;
+  const throwing = {
+    toJSON() {
+      toJsonCalls += 1;
+      return { token: 'private-token' };
+    },
+  };
+  Object.defineProperty(throwing, 'privateValue', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      throw new Error('private getter detail');
+    },
+  });
+  const unavailable = sanitizeDiagnosticLogEntry({ id: 'log-getter', response: throwing });
+  assert.equal(getterCalls, 0);
+  assert.equal(toJsonCalls, 0);
+  assert.equal(unavailable.response.privateValue, '[unavailable]');
+  assert.equal(unavailable.response.toJSON, '[unavailable]');
+  assert.doesNotMatch(JSON.stringify(unavailable), /private getter detail|private-token/);
+
+  let envelopeGetterCalls = 0;
+  const hostileEnvelope = { id: 'log-envelope' };
+  Object.defineProperty(hostileEnvelope, 'error', {
+    enumerable: true,
+    get() {
+      envelopeGetterCalls += 1;
+      return 'private envelope error';
+    },
+  });
+  const safeEnvelope = sanitizeDiagnosticLogEntry(hostileEnvelope);
+  assert.equal(envelopeGetterCalls, 0);
+  assert.equal(safeEnvelope.error, '[unavailable]');
 });
 
 test('manual zone commands send Orbit websocket change-mode payloads', () => {
   const sent = [];
+  const logs = [];
   class FakeWebSocket {}
   FakeWebSocket.OPEN = 1;
   const client = new OrbitClient({
@@ -266,6 +558,7 @@ test('manual zone commands send Orbit websocket change-mode payloads', () => {
     readyState: FakeWebSocket.OPEN,
     send: (payload) => sent.push(JSON.parse(payload)),
   };
+  client.on('request-log', (entry) => logs.push(entry));
 
   client.startZone({ deviceId: 'device-1', station: 3, minutes: 10 });
   client.stopZone({ deviceId: 'device-1' });
@@ -284,6 +577,66 @@ test('manual zone commands send Orbit websocket change-mode payloads', () => {
   });
   assert.ok(Number.isFinite(Date.parse(sent[0].timestamp)));
   assert.ok(Number.isFinite(Date.parse(sent[1].timestamp)));
+  assert.equal(logs.length, 2);
+  assert.equal(logs[0].request.device_id, '[redacted]');
+  assert.equal(logs[0].request.stations, '[redacted]');
+  assert.doesNotMatch(JSON.stringify(logs), /device-1/);
+});
+
+test('a replaced websocket cannot stop the current Orbit stream', () => {
+  class FakeWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static instances = [];
+
+    constructor() {
+      this.readyState = FakeWebSocket.CONNECTING;
+      this.listeners = new Map();
+      this.sent = [];
+      FakeWebSocket.instances.push(this);
+    }
+
+    addEventListener(name, listener) {
+      const listeners = this.listeners.get(name) || [];
+      listeners.push(listener);
+      this.listeners.set(name, listeners);
+    }
+
+    emit(name, event = {}) {
+      for (const listener of this.listeners.get(name) || []) listener(event);
+    }
+
+    send(payload) {
+      this.sent.push(JSON.parse(payload));
+    }
+
+    close() {
+      this.readyState = FakeWebSocket.CLOSING;
+    }
+  }
+
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    WebSocketImpl: FakeWebSocket,
+  });
+  client.token = 'session-token';
+
+  client.connectStream();
+  const first = FakeWebSocket.instances[0];
+  client.restartStream();
+  const replacement = FakeWebSocket.instances[1];
+  replacement.readyState = FakeWebSocket.OPEN;
+  replacement.emit('open');
+
+  assert.equal(client.streamConnected, true);
+  assert.equal(client.ws, replacement);
+  first.emit('close');
+  assert.equal(client.streamConnected, true);
+  assert.equal(client.ws, replacement);
+
+  client.closeStream();
 });
 
 test('program start requires and sends the runnable Orbit program key', () => {

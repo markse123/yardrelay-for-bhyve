@@ -4,7 +4,26 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { OrbitClient, PROGRAM_MUTABLE_KEYS, pickProgramMutableFields, pickProgramUpdateFields } from './orbit-client.js';
+import {
+  sanitizeDiagnosticMessage,
+  sanitizeDiagnosticPath,
+  sanitizeDiagnosticText,
+  sanitizeDiagnosticValue,
+  summarizeYardRunResponseForDiagnostics,
+} from '../public/diagnostics.js';
+import {
+  OrbitClient,
+  PROGRAM_MUTABLE_KEYS,
+  pickProgramMutableFields,
+  pickProgramUpdateFields,
+  sanitizeDiagnosticLogEntry,
+} from './orbit-client.js';
+import {
+  createRefreshTaskRunner,
+  ensureOrbitConnection,
+  ensureScheduledRefresh,
+  refreshRequiresFreshTask,
+} from './orbit-lifecycle.js';
 import {
   buildTrustedHosts,
   isLoopbackAddress,
@@ -76,6 +95,9 @@ const MAX_HISTORY_PAGES = 10;
 const MAX_HISTORY_EVENTS = 200;
 const RAIN_DELAY_VERIFY_DELAYS_MS = [1000, 2000, 3500];
 const MAX_REQUEST_LOGS = 250;
+const MAX_STATUS_ERROR_LENGTH = 1200;
+const MAX_STATUS_ERROR_CONTEXT_LENGTH = 160;
+const SAFE_DIAGNOSTIC_QUERY_KEYS = new Set(['hours', 'page', 'per-page', 't']);
 const YARD_RUN_DEFAULT_MINUTES = 10;
 const YARD_RUN_STEP_GAP_MS = 2500;
 const WATERING_RUNS = loadWateringRuns(yardRunConfigPath);
@@ -94,6 +116,7 @@ const recentEvents = [];
 const recentLogs = [];
 let orbit = null;
 let refreshTimer = null;
+const runRefreshTask = createRefreshTaskRunner();
 let yardRunTimer = null;
 let yardRunPersistQueue = Promise.resolve();
 let shuttingDown = false;
@@ -106,6 +129,8 @@ let state = {
     streamConnected: false,
     lastRefresh: null,
     lastError: null,
+    lastErrorAt: null,
+    lastErrorContext: null,
     startedAt: new Date().toISOString(),
   },
   devices: [],
@@ -139,15 +164,19 @@ const server = createServer(async (req, res) => {
     res.requestLog = requestLog;
     await route(req, res);
   } catch (error) {
+    const requestError = sanitizeDiagnosticMessage(
+      error?.message || error,
+      { maxLength: MAX_STATUS_ERROR_LENGTH },
+    );
     if (requestLog) {
-      requestLog.error = error.message;
+      requestLog.error = requestError;
     }
     const statusCode = error.statusCode || 500;
     sendJson(res, statusCode, { error: statusCode >= 500 ? 'Internal server error' : error.message });
     if (statusCode >= 500) {
       logError('Unhandled request error', error);
     } else {
-      addEvent('warn', error.message);
+      addEvent('warn', requestError);
       broadcastState();
     }
   }
@@ -235,6 +264,14 @@ async function route(req, res) {
     requireWriteAccess(req);
     await refreshState({ force: true });
     addEvent('info', 'Refresh requested from UI');
+    broadcastState();
+    return sendJson(res, 200, state);
+  }
+
+  if (url.pathname === '/api/reconnect' && req.method === 'POST') {
+    requireWriteAccess(req);
+    await refreshState({ force: true, forceLogin: true });
+    addEvent('info', 'One-time connection retry requested from UI');
     broadcastState();
     return sendJson(res, 200, state);
   }
@@ -337,10 +374,9 @@ async function route(req, res) {
     const hours = clampInteger(body.hours, 0, MAX_RAIN_DELAY_HOURS, 'hours');
     const deviceId = rainDelayMatch[0];
     const device = requireDevice(deviceId);
-    const deviceName = device.name || deviceId;
     ensureOrbitReady();
     await orbit.setRainDelay({ deviceId, hours });
-    const result = await verifyRainDelay({ deviceId, deviceName, hours });
+    const result = await verifyRainDelay({ deviceId, hours });
     addEvent(result.ok ? 'action' : 'warn', result.message);
     broadcastState();
     return sendJson(res, 200, result);
@@ -371,14 +407,7 @@ async function route(req, res) {
 
 async function connectOrbit() {
   ensureOrbitConfigured();
-  await orbit.login();
-  state.status.authenticated = true;
-  state.status.lastError = null;
-  orbit.connectStream();
   await refreshState({ force: true });
-  refreshTimer = setInterval(() => {
-    refreshState({ force: true }).catch((error) => logError('Scheduled refresh failed', error));
-  }, REFRESH_MS);
 }
 
 function wireOrbit(client) {
@@ -495,14 +524,31 @@ function refreshSoon() {
   }, 1500);
 }
 
-async function refreshState() {
+function refreshState(options = {}) {
+  return runRefreshTask(
+    () => performRefreshState(options),
+    {
+      force: refreshRequiresFreshTask(options),
+      forceLogin: Boolean(options.forceLogin),
+    },
+  );
+}
+
+async function performRefreshState({ forceLogin = false } = {}) {
+  if (shuttingDown) return currentState();
   ensureOrbitConfigured();
-  if (!orbit.authenticated) {
-    await orbit.login();
-    state.status.authenticated = true;
+  await ensureOrbitConnection(orbit, { forceLogin });
+  if (shuttingDown) {
+    orbit.closeStream();
+    return currentState();
   }
+  state.status.authenticated = true;
 
   const [devices, programs] = await Promise.all([orbit.devices(), orbit.programs()]);
+  if (shuttingDown) {
+    orbit.closeStream();
+    return currentState();
+  }
   state = {
     ...state,
     status: {
@@ -512,6 +558,8 @@ async function refreshState() {
       streamConnected: orbit.streamConnected,
       lastRefresh: new Date().toISOString(),
       lastError: null,
+      lastErrorAt: null,
+      lastErrorContext: null,
     },
     devices: Array.isArray(devices) ? devices : [],
     programs: Array.isArray(programs) ? programs : [],
@@ -520,6 +568,9 @@ async function refreshState() {
   resumeRecoveredYardRun();
   state.yardRun = describeYardRun();
   broadcastState();
+  refreshTimer = ensureScheduledRefresh(refreshTimer, () => setInterval(() => {
+    refreshState({ force: true }).catch((error) => logError('Scheduled refresh failed', error));
+  }, REFRESH_MS));
   return currentState();
 }
 
@@ -528,13 +579,13 @@ function startOrAppendYardRun(runKey, { minutes }) {
   const run = requireWateringRun(runKey);
   const steps = resolveYardRunSteps(runKey, { minutes });
   if (steps.length === 0) {
-    throw newHttpError(409, `${run.label} has no available zones in the current Orbit state`);
+    throw newHttpError(409, 'The selected watering run has no available zones in the current Orbit state');
   }
 
   if (yardRun.status === 'idle') {
     const activeZones = collectActiveWateringZones();
     if (activeZones.length > 0) {
-      throw newHttpError(409, `Watering is already active on ${activeZones[0].zoneName}`);
+      throw newHttpError(409, 'Watering is already active on another zone');
     }
     yardRun = createActiveYardRun();
   }
@@ -633,7 +684,7 @@ function startNextYardStep() {
     yardRun.completedSteps.push(failedStep);
     yardRun.currentStep = null;
     yardRun.updatedAt = new Date().toISOString();
-    logError(`Failed to start yard run zone ${failedStep.zoneName}`, error);
+    logError('Failed to start a configured yard-run zone', error);
     persistYardRunState();
     yardRunTimer = setTimeout(startNextYardStep, YARD_RUN_STEP_GAP_MS);
   }
@@ -673,7 +724,7 @@ function stopYardStep(step) {
   try {
     orbit.stopZone({ deviceId: step.deviceId });
   } catch (error) {
-    logError(`Failed to stop yard run zone ${step.zoneName}`, error);
+    logError('Failed to stop a configured yard-run zone', error);
   }
   clearYardStepWateringStatus(step);
 }
@@ -861,7 +912,7 @@ function createActiveYardRun() {
 function requireWateringRun(runKey) {
   const run = WATERING_RUN_BY_KEY.get(runKey);
   if (!run) {
-    throw newHttpError(404, `Unknown watering run ${runKey}`);
+    throw newHttpError(404, 'Unknown watering run');
   }
   return run;
 }
@@ -1044,10 +1095,8 @@ function wateringStatuses(device) {
 
 async function buildZoneHistory({ hours }) {
   ensureOrbitConfigured();
-  if (!orbit.authenticated) {
-    await orbit.login();
-    state.status.authenticated = true;
-  }
+  await ensureOrbitConnection(orbit);
+  state.status.authenticated = true;
   if ((state.devices || []).length === 0) {
     await refreshState();
   }
@@ -1330,7 +1379,7 @@ async function updateProgram(programId, submittedProgram) {
   return findProgram(programId);
 }
 
-async function verifyRainDelay({ deviceId, deviceName, hours }) {
+async function verifyRainDelay({ deviceId, hours }) {
   let actualHours = getRainDelayHours(deviceId);
 
   for (const delayMs of RAIN_DELAY_VERIFY_DELAYS_MS) {
@@ -1340,8 +1389,8 @@ async function verifyRainDelay({ deviceId, deviceName, hours }) {
     if (rainDelayMatches(actualHours, hours)) {
       const message =
         hours === 0
-          ? `Orbit reports rain delay cleared for ${deviceName}`
-          : `Orbit reports ${hours}h rain delay for ${deviceName}`;
+          ? 'Orbit reports the rain delay is cleared'
+          : `Orbit reports a ${hours}h rain delay`;
       return {
         ok: true,
         message,
@@ -1354,8 +1403,8 @@ async function verifyRainDelay({ deviceId, deviceName, hours }) {
 
   const message =
     hours === 0
-      ? `Sent the clear command, but ${deviceName} still reports ${actualHours}h rain delay after refresh`
-      : `Sent the rain delay command, but ${deviceName} reports ${actualHours}h instead of ${hours}h after refresh`;
+      ? `Sent the clear command, but Orbit still reports a ${actualHours}h rain delay after refresh`
+      : `Sent the rain delay command, but Orbit reports ${actualHours}h instead of ${hours}h after refresh`;
   return {
     ok: false,
     warning: message,
@@ -1390,7 +1439,7 @@ function requireDevice(deviceId) {
   }
   const device = findDevice(deviceId);
   if (!device) {
-    throw newHttpError(404, `Unknown device ${deviceId}`);
+    throw newHttpError(404, 'Unknown device');
   }
   return device;
 }
@@ -1477,7 +1526,7 @@ async function saveSnapshot(action, id, payload) {
 function findProgram(programId) {
   const program = state.programs.find((item) => String(item.id) === String(programId));
   if (!program) {
-    throw newHttpError(404, `Unknown program ${programId}`);
+    throw newHttpError(404, 'Unknown program');
   }
   return program;
 }
@@ -1664,14 +1713,10 @@ function addEvent(level, message, detail = null) {
 }
 
 function addLog(entry) {
-  const normalized = {
-    id: entry.id || crypto.randomUUID(),
-    at: entry.at || new Date().toISOString(),
-    source: entry.source || 'local',
-    kind: entry.kind || 'event',
-    level: entry.level || (entry.ok === false ? 'error' : 'info'),
-    ...entry,
-  };
+  const normalized = sanitizeDiagnosticLogEntry(entry, {
+    defaultId: crypto.randomUUID(),
+    defaultAt: new Date().toISOString(),
+  });
   recentLogs.unshift(normalized);
   recentLogs.splice(MAX_REQUEST_LOGS);
   broadcast('request-log', normalized);
@@ -1691,6 +1736,7 @@ function createHttpRequestLog(req) {
     path: sanitizePath(`${url.pathname}${url.search}`),
     client: normalizeClientAddress(req.socket.remoteAddress),
     startedAt: Date.now(),
+    internalProbe: url.pathname === '/api/identity',
     request: null,
   };
 }
@@ -1713,8 +1759,11 @@ function finishHttpRequestLog(res, statusCode, payload) {
   entry.ok = statusCode < 400;
   entry.durationMs = Date.now() - entry.startedAt;
   entry.response = summarizeLocalResponse(entry.path, payload);
+  const suppressSuccessfulProbe = entry.internalProbe && entry.ok;
   delete entry.startedAt;
   delete entry.finished;
+  delete entry.internalProbe;
+  if (suppressSuccessfulProbe) return;
   addLog(entry);
 }
 
@@ -1739,9 +1788,10 @@ function summarizeLocalResponse(pathname, payload) {
       protocolVersion: payload.protocolVersion,
       challenge: '[redacted]',
       proof: '[redacted]',
+      error: payload.error ? sanitizeDiagnosticText(payload.error, { maxLength: 500 }) : undefined,
     };
   }
-  if (pathOnly === '/api/state' || pathOnly === '/api/refresh') {
+  if (pathOnly === '/api/state' || pathOnly === '/api/refresh' || pathOnly === '/api/reconnect') {
     return {
       status: payload.status ? {
         configured: payload.status.configured,
@@ -1749,6 +1799,8 @@ function summarizeLocalResponse(pathname, payload) {
         streamConnected: payload.status.streamConnected,
         lastRefresh: payload.status.lastRefresh,
         lastError: payload.status.lastError,
+        lastErrorAt: payload.status.lastErrorAt,
+        lastErrorContext: payload.status.lastErrorContext,
       } : undefined,
       devices: Array.isArray(payload.devices) ? payload.devices.length : 0,
       programs: Array.isArray(payload.programs) ? payload.programs.length : 0,
@@ -1770,12 +1822,15 @@ function summarizeLocalResponse(pathname, payload) {
       errors: Array.isArray(payload.errors) ? payload.errors.length : 0,
     };
   }
+  if (pathOnly.startsWith('/api/yard-runs/')) {
+    return summarizeYardRunResponseForDiagnostics(payload);
+  }
   return summarizePayload(payload);
 }
 
 function summarizePayload(value) {
   if (value === undefined) return null;
-  const scrubbed = scrubSensitive(value);
+  const scrubbed = sanitizeDiagnosticValue(value);
   const text = safeJson(scrubbed);
   if (text.length <= 2200) return scrubbed;
   return {
@@ -1784,34 +1839,19 @@ function summarizePayload(value) {
   };
 }
 
-function scrubSensitive(value) {
-  if (Array.isArray(value)) {
-    return value.map(scrubSensitive);
-  }
-  if (!value || typeof value !== 'object') {
-    return value;
-  }
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [
-      key,
-      /token|password|secret|key|email|session|authorization|cookie/i.test(key)
-        ? '[redacted]'
-        : scrubSensitive(item),
-    ]),
-  );
-}
-
 function sanitizePath(pathname) {
   const [pathOnly, query = ''] = String(pathname).split('?');
-  if (!query) return pathOnly;
+  const sanitizedPath = sanitizeDiagnosticPath(pathOnly);
+  if (!query) return sanitizedPath;
   const params = new URLSearchParams(query);
   for (const key of [...params.keys()]) {
-    if (/token|password|secret|key|email|session|auth/i.test(key)) {
+    const values = params.getAll(key);
+    if (!SAFE_DIAGNOSTIC_QUERY_KEYS.has(key) || values.some((value) => !/^\d+$/.test(value))) {
       params.set(key, '[redacted]');
     }
   }
   const sanitized = params.toString();
-  return sanitized ? `${pathOnly}?${sanitized}` : pathOnly;
+  return sanitized ? `${sanitizedPath}?${sanitized}` : sanitizedPath;
 }
 
 function normalizeClientAddress(address) {
@@ -1828,9 +1868,17 @@ function safeJson(value) {
 }
 
 function logError(message, error) {
-  console.error(`${message}:`, error);
-  state.status.lastError = error.message;
-  addEvent('error', `${message}: ${error.message}`);
+  const context = sanitizeDiagnosticText(message, { maxLength: MAX_STATUS_ERROR_CONTEXT_LENGTH }) || 'Controller error';
+  const detail = sanitizeDiagnosticMessage(
+    error?.message || error,
+    { maxLength: MAX_STATUS_ERROR_LENGTH },
+  ) || 'Unknown error';
+  const at = new Date().toISOString();
+  console.error(`${context}: ${detail}`);
+  state.status.lastError = detail;
+  state.status.lastErrorAt = at;
+  state.status.lastErrorContext = context;
+  addEvent('error', `${context}: ${detail}`);
   broadcastState();
 }
 
@@ -1918,6 +1966,8 @@ function shutdown() {
   shuttingDown = true;
   console.log('Shutting down YardRelay server');
   clearInterval(refreshTimer);
+  clearTimeout(refreshSoonTimer);
+  refreshSoonTimer = null;
   clearTimeout(yardRunTimer);
   if (orbit) {
     orbit.closeStream();
