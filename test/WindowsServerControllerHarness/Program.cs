@@ -246,13 +246,14 @@ async Task VerifyExternalListenerLossRevokesTrustAsync()
 
 async Task VerifyStartupRetryExhaustionFailsClosedAsync()
 {
-    var port = GetUnusedLoopbackPort();
-    using var controller = CreateController(port, startupProbeAttempts: 1, startupProbeDelay: TimeSpan.Zero);
+    await using var fake = new FakeController(appToken, authenticated: false, dropConnections: true);
+    fake.Start();
+    using var controller = CreateController(fake.Port, startupProbeAttempts: 2, startupProbeDelay: TimeSpan.Zero);
     var waitMethod = typeof(ServerController).GetMethod(
         "WaitUntilReachableAsync",
         System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
         ?? throw new InvalidOperationException("Startup wait helper was not found.");
-    var waitTask = (Task)(waitMethod.Invoke(controller, [Settings(port), Secrets(), CancellationToken.None])
+    var waitTask = (Task)(waitMethod.Invoke(controller, [Settings(fake.Port), Secrets(), CancellationToken.None])
         ?? throw new InvalidOperationException("Startup wait helper did not return a task."));
 
     await AssertThrowsAsync<TimeoutException>(async () => await waitTask, "did not become reachable");
@@ -284,15 +285,6 @@ static void SetPrivateField<T>(ServerController controller, string name, T value
         System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
         ?? throw new InvalidOperationException($"ServerController field {name} was not found.");
     field.SetValue(controller, value);
-}
-
-static int GetUnusedLoopbackPort()
-{
-    var listener = new TcpListener(IPAddress.Loopback, 0);
-    listener.Start();
-    var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-    listener.Stop();
-    return port;
 }
 
 DesktopSettings Settings(int port)
@@ -331,16 +323,22 @@ sealed class FakeController : IAsyncDisposable
 {
     private readonly string _appToken;
     private readonly bool _authenticated;
+    private readonly bool _dropConnections;
     private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
     private readonly CancellationTokenSource _stop = new();
     private Task? _serverTask;
     private string? _lastChallenge;
     private bool _stopped;
 
-    public FakeController(string appToken, bool authenticated, int? signedOriginPort = null)
+    public FakeController(
+        string appToken,
+        bool authenticated,
+        int? signedOriginPort = null,
+        bool dropConnections = false)
     {
         _appToken = appToken;
         _authenticated = authenticated;
+        _dropConnections = dropConnections;
         SignedOriginPort = signedOriginPort;
     }
 
@@ -379,6 +377,11 @@ sealed class FakeController : IAsyncDisposable
         while (!_stop.IsCancellationRequested)
         {
             using var client = await _listener.AcceptTcpClientAsync(_stop.Token);
+            if (_dropConnections)
+            {
+                client.Client.LingerState = new LingerOption(true, 0);
+                continue;
+            }
             await HandleAsync(client, _stop.Token);
         }
     }
