@@ -28,10 +28,16 @@ const MAC_ADDRESS_PATTERN = /\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b/g;
 const STREET_ADDRESS_PATTERN = /\b\d{1,6}\s+[A-Z][A-Za-z0-9'.-]*(?:\s+[A-Z][A-Za-z0-9'.-]*){0,5}\s+(?:Street|St\.?|Road|Rd\.?|Avenue|Ave\.?|Circle|Cir\.?|Drive|Dr\.?|Lane|Ln\.?|Court|Ct\.?|Way|Boulevard|Blvd\.?|Trail|Trl\.?|Terrace|Ter\.?|Place|Pl\.?)\b/gi;
 const PHONE_NUMBER_PATTERN = /(^|[^\d])((?:\+?1[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]\d{3}[\s.-]\d{4}|(?:\+?1)?\d{10})(?=$|[^\d])/g;
 const ORBIT_DEVICE_ASSET_PATTERN = /\bdevice-assets\/[0-9a-f]{24}\b/gi;
-const PRIVATE_ASSIGNMENT_VALUE_PATTERN = String.raw`(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\r\n,;]*?)(?=\s+[A-Za-z_][A-Za-z0-9_-]*\s*[:=]|[,;\r\n]|$)`;
+const SENSITIVE_FIELD_SEGMENT_PATTERN = String.raw`(?:token|password|secret|key|email|session|authorization|auth|cookie|challenge|proof|credentials?)`;
+const DELIMITED_SENSITIVE_FIELD_PATTERN = String.raw`(?:[a-z0-9]+[_-])*${SENSITIVE_FIELD_SEGMENT_PATTERN}(?:[_-][a-z0-9]+)*`;
+const PRIVATE_ASSIGNMENT_VALUE_PATTERN = String.raw`(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\r\n,;}]*?)(?=(?:\s+(?:[{[]\s*)?["']?[A-Za-z_][A-Za-z0-9_-]*["']?\s*[:=]|\s*[,;}\]\r\n]|\s*$))`;
 const PRIVATE_FIELD_ASSIGNMENT_PATTERN = new RegExp(
-  String.raw`\b((?:token|password|secret|key|email|session|authorization|auth|cookie|challenge|proof|credentials?|id|(?:account|controller|device|event|program|station|user|zone)[_-]?id|[a-z0-9]+(?:[_-][a-z0-9]+)*[_-]ids?|[a-z0-9]+(?:[_-][a-z0-9]+)*[_-](?:name|label)|address(?:[_-]?line[_-]?\d*)?|city|coordinates?|formatted[_-]?address|full[_-]?location|geo(?:location)?|lat(?:itude)?|line[_-]?[12]|lng|location(?:[_-]?(?:id|name))?|lon(?:gitude)?|place[_-]?id|postal[_-]?code|street(?:[_-]?address)?|zip(?:[_-]?code)?|(?:hardware|mac|wifi[_-]?mac)[_-]?address|bssid|mac|ssid|(?:contact|customer|display|family|first|full|given|last|owner|person|user)[_-]?name|name|label|mobile(?:[_-]?number)?|phone(?:[_-]?(?:home|mobile|number|work))?|telephone|(?:(?:device|profile)[_-]?)?(?:avatar|icon|image|photo|picture|thumbnail)(?:[_-]?(?:id|path|uri|url))?|asset[_-]?(?:id|path|uri|url))["']?\s*[:=]\s*)${PRIVATE_ASSIGNMENT_VALUE_PATTERN}`,
+  String.raw`\b((?:${DELIMITED_SENSITIVE_FIELD_PATTERN}|id|(?:account|controller|device|event|program|station|user|zone)[_-]?id|[a-z0-9]+(?:[_-][a-z0-9]+)*[_-]ids?|[a-z0-9]+(?:[_-][a-z0-9]+)*[_-](?:name|label)|address(?:[_-]?line[_-]?\d*)?|city|coordinates?|formatted[_-]?address|full[_-]?location|geo(?:location)?|lat(?:itude)?|line[_-]?[12]|lng|location(?:[_-]?(?:id|name))?|lon(?:gitude)?|place[_-]?id|postal[_-]?code|street(?:[_-]?address)?|zip(?:[_-]?code)?|(?:hardware|mac|wifi[_-]?mac)[_-]?address|bssid|mac|ssid|(?:contact|customer|display|family|first|full|given|last|owner|person|user)[_-]?name|name|label|mobile(?:[_-]?number)?|phone(?:[_-]?(?:home|mobile|number|work))?|telephone|(?:(?:device|profile)[_-]?)?(?:avatar|icon|image|photo|picture|thumbnail)(?:[_-]?(?:id|path|uri|url))?|asset[_-]?(?:id|path|uri|url))["']?\s*[:=]\s*)${PRIVATE_ASSIGNMENT_VALUE_PATTERN}`,
   'gi',
+);
+const CAMEL_SENSITIVE_FIELD_ASSIGNMENT_PATTERN = new RegExp(
+  String.raw`\b([A-Za-z][A-Za-z0-9]*(?:Token|Password|Secret|Key|Email|Session|Authorization|Auth|Cookie|Challenge|Proof|Credential|Credentials)(?:[A-Z][A-Za-z0-9]*)?["']?\s*[:=]\s*)${PRIVATE_ASSIGNMENT_VALUE_PATTERN}`,
+  'g',
 );
 const CAMEL_PRIVATE_FIELD_ASSIGNMENT_PATTERN = new RegExp(
   String.raw`\b([a-z][A-Za-z0-9]*(?:Id|Ids|Name|Label)["']?\s*[:=]\s*)${PRIVATE_ASSIGNMENT_VALUE_PATTERN}`,
@@ -48,15 +54,16 @@ export function sanitizeDiagnosticText(value, { maxLength = DEFAULT_DIAGNOSTIC_T
     .replace(PRIVATE_PATH_IDENTIFIER_PATTERN, '$1[redacted]')
     .replace(PRIVATE_ERROR_IDENTIFIER_PATTERN, '$1[redacted]')
     .replace(PRIVATE_ACTIVE_ZONE_PATTERN, '$1[redacted]')
-    .replace(AUTH_HEADER_PATTERN, '$1[redacted]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
     .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[redacted email]')
     .replace(MAC_ADDRESS_PATTERN, '[redacted MAC]')
     .replace(STREET_ADDRESS_PATTERN, '[redacted address]')
     .replace(PHONE_NUMBER_PATTERN, '$1[redacted phone]')
     .replace(ORBIT_DEVICE_ASSET_PATTERN, '[redacted image]')
+    .replace(CAMEL_SENSITIVE_FIELD_ASSIGNMENT_PATTERN, '$1[redacted]')
     .replace(CAMEL_PRIVATE_FIELD_ASSIGNMENT_PATTERN, '$1[redacted]')
     .replace(PRIVATE_FIELD_ASSIGNMENT_PATTERN, '$1[redacted]')
+    .replace(AUTH_HEADER_PATTERN, '$1[redacted]')
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();

@@ -157,7 +157,7 @@ Common behavior:
 - Embedded browsers allow navigation only to the exact configured loopback controller origin and reject popups or redirects elsewhere.
 - Runtime state is stored outside the app bundle by setting `BHYVE_DATA_DIR`.
 - Desktop setup should follow the shared contract in `docs/desktop-setup.md`.
-- Release checks remain disabled until the separate private release repository exists and has been verified. V1 does not silently download, execute, or replace app binaries.
+- Release checks remain disabled while this clean-history repository is private and until its public release destination has been verified. V1 does not silently download, execute, or replace app binaries.
 - Help opens the bundled guide from `public/help/index.html`, including when the local controller server is stopped.
 - Help opens approved download and release links in the system browser instead of navigating the embedded controller view.
 
@@ -178,7 +178,7 @@ swift build
 
 ### Windows Wrapper
 
-`windows/BHyveControllerApp` contains a WPF/WebView2 wrapper with a first-run setup wizard. It stores non-secret settings under the current user's local app-data folder, encrypts Orbit credentials for the current Windows user with DPAPI, and starts the Node controller with environment variables instead of writing an installed `.env` file. Existing private-development installs continue to recognize the legacy `%LOCALAPPDATA%\BHyveController` path until the data migration phase is complete.
+`windows/BHyveControllerApp` contains a WPF/WebView2 wrapper with a first-run setup wizard. It stores non-secret settings under `%LOCALAPPDATA%\YardRelay`, encrypts Orbit credentials for the current Windows user with DPAPI, and starts the Node controller with environment variables instead of writing an installed `.env` file. On first startup after an older installation, it prefers an existing YardRelay folder unchanged. Only when that destination is absent, it makes a staged one-time copy of `%LOCALAPPDATA%\BHyveController`, retains the legacy source, and then uses the new folder. It never merges into or overwrites an existing destination, and later startups are a no-op. Within copied `settings.json`, only the exact legacy default data and yard-run config paths are rewritten; custom paths are preserved.
 
 The wizard checks Node.js and WebView2, lets the user enter Orbit credentials, offers a read-only Test Orbit Login button, generates the local app token, and can import an existing `.env` or yard-run config as a migration shortcut. Its optional browser-control lock selects `WRITE_ACCESS_MODE=protected`; it is off by default for prompt-free loopback controls.
 
@@ -190,7 +190,7 @@ Build the wrapper:
 dotnet build windows/BHyveControllerApp/BHyveControllerApp.csproj -c Release
 ```
 
-Create the self-contained Windows package zip:
+Create the Windows package zip with a self-contained .NET runtime. Node.js 24 or newer and WebView2 Runtime are still required on the target computer:
 
 ```powershell
 ./windows/package-windows.ps1 -Runtime win-x64
@@ -202,9 +202,32 @@ Create the per-user installer on Windows with Inno Setup 6 installed:
 ./windows/package-windows.ps1 -Runtime win-x64 -BuildInstaller
 ```
 
-The package output is written under `outputs/windows/`. The zip is `YardRelay-win-x64.zip`; the installer is `YardRelaySetup-<version>.exe` when `-BuildInstaller` is used. CI validates the Windows package shape without publishing installable artifacts. A separate, human-gated draft-release workflow will be added during the packaging phase.
+The package output is written under `outputs/windows/`. The zip is `YardRelay-win-x64.zip`; the installer is `YardRelaySetup-<version>.exe` when `-BuildInstaller` is used. CI validates the Windows package shape without publishing installable artifacts. Version tags that exactly match `package.json` run the separate release workflow, which builds the unsigned installer, scans the final publish tree, generates SHA-256 checksums, an SPDX software bill of materials, and build provenance, and creates a draft prerelease for human inspection. The workflow never publishes the draft automatically; signing and repository visibility remain separate human-controlled gates described in [the public release plan](docs/public-release-plan.md).
 
 The app expects Node.js 24 or newer and WebView2 Runtime on the target machine; setup links to the official download pages when either prerequisite is missing.
+
+#### Install an unsigned Windows beta
+
+After a beta is published:
+
+1. Download `YardRelaySetup-<version>.exe` and its published SHA-256 checksum from this repository's verified GitHub release page. Do not use an installer copied from another site.
+2. In PowerShell, calculate the installer checksum:
+
+   ```powershell
+   Get-FileHash .\YardRelaySetup-<version>.exe -Algorithm SHA256
+   ```
+
+3. Compare the complete hexadecimal hash with the value published on the release page. Do not run the installer if they differ.
+4. Run the installer. The beta is unsigned, so Microsoft Defender SmartScreen may show **Windows protected your PC** and **Unknown publisher**. Only after the source and checksum match, select **More info**, confirm the app is `YardRelaySetup-<version>.exe`, and select **Run anyway**. Do not bypass any different or unexpected warning.
+5. Complete Desktop setup. Install Node.js 24 or newer and WebView2 Runtime first if the prerequisite check reports either one missing.
+
+To uninstall, open **Windows Settings > Apps > Installed apps**, find **YardRelay**, and choose **Uninstall**. Uninstall removes the app but preserves `%LOCALAPPDATA%\YardRelay` so settings, encrypted credentials, configuration, snapshots, and logs are not destroyed automatically.
+
+#### Back up or restore Windows data
+
+Quit YardRelay and make sure its managed controller has stopped before copying app data. Back up the complete `%LOCALAPPDATA%\YardRelay` folder. Restore only while YardRelay is stopped, and never merge a backup into an existing app-data folder: rename or move the existing `%LOCALAPPDATA%\YardRelay` directory first, then copy the backup into that exact location.
+
+This is a manual local backup/restore procedure, not an encrypted archive feature. Only `secrets.bin` is DPAPI-protected; settings, configuration, data, snapshots, and logs may contain sensitive property or device information in plaintext. Keep the backup private and encrypted at rest. The DPAPI-protected credentials are usable only by the same Windows user/profile that created them and are not portable to another profile or computer; re-enter Orbit credentials when restoring elsewhere.
 
 ## Development
 
@@ -275,7 +298,7 @@ Build the optional Windows wrapper:
 dotnet build windows/BHyveControllerApp/BHyveControllerApp.csproj -c Release
 ```
 
-Create the self-contained Windows package:
+Create the Windows package with a bundled .NET runtime:
 
 ```powershell
 ./windows/package-windows.ps1 -Runtime win-x64
@@ -337,7 +360,7 @@ Never commit:
 
 ## Credits And Upstream Research
 
-This project was built with help from local research copies of existing open-source B-hyve and Home Assistant projects. Those research clones are not vendored because fixtures can contain real-looking addresses, device identifiers, or account-specific values. The exact reviewed snapshots, their role, and their license notices are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [docs/provenance.md](docs/provenance.md).
+This clean-history repository was created as the public-source boundary for YardRelay. The earlier private development repository and its Git history are not part of this repository and must not be imported. The project was built with help from local research copies of existing open-source B-hyve and Home Assistant projects. Those research clones are not vendored because fixtures can contain real-looking addresses, device identifiers, or account-specific values. The exact reviewed snapshots, their role, and their license notices are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [docs/provenance.md](docs/provenance.md).
 
 Credited sources:
 

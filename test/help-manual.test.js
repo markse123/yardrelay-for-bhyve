@@ -72,7 +72,10 @@ test('dashboard and desktop packages include the shared help source', async () =
   ]);
 
   assert.match(dashboard, /href="\/help\/index\.html"[^>]*>Help<\/a>/);
-  assert.match(windowsProject.replaceAll('\\', '/'), /Content Include="\.\.\/\.\.\/public\/\*\*\/\*"/);
+  const normalizedWindowsProject = windowsProject.replaceAll('\\', '/');
+  assert.match(normalizedWindowsProject, /\.\.\/\.\.\/public\/help\/index\.html/);
+  assert.match(normalizedWindowsProject, /\.\.\/\.\.\/public\/help\/manual\.css/);
+  assert.match(normalizedWindowsProject, /\.\.\/\.\.\/public\/help\/manual\.js/);
   assert.match(windowsWindow, /Content="Help" Click="HelpButton_Click"/);
   assert.match(windowsWindow, /Content="Help and user guide" Click="HelpButton_Click"/);
   assert.match(macBuild, /rm -rf "\$RESOURCES_DIR\/Help"/);

@@ -2,30 +2,192 @@ import crypto from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-export const YARD_RUN_STATE_VERSION = 1;
+export const YARD_RUN_STATE_VERSION = 2;
+export const YARD_RUN_RECOVERY_MAX_AGE_MS = 3 * 60 * 60 * 1000;
 const MAX_PERSISTED_STEPS = 100;
 const MAX_PERSISTED_MINUTES = 120;
 const MAX_PERSISTED_STATION = 255;
 const SIGNATURE_ALGORITHM = 'sha256';
 const SIGNATURE_HEX_LENGTH = 64;
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/i;
 
-export async function loadYardRunState(filePath, { integritySecret = '', requireSignature = Boolean(integritySecret) } = {}) {
-  let parsed;
-  try {
-    parsed = JSON.parse(await readFile(filePath, 'utf8'));
-  } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw new Error(`Could not read yard-run state: ${error.message}`);
+export function createYardRunConfigDigest(wateringRuns) {
+  if (!Array.isArray(wateringRuns)) {
+    throw new TypeError('watering runs must be an array');
   }
-
-  if (requireSignature) {
-    verifyYardRunStateSignature(parsed, integritySecret, 'yard-run state');
-  }
-
-  return normalizeYardRunState(parsed);
+  return crypto
+    .createHash(SIGNATURE_ALGORITHM)
+    .update(JSON.stringify(wateringRuns))
+    .digest('hex');
 }
 
-export async function saveYardRunState(filePath, yardRun, { integritySecret = '' } = {}) {
+export function yardRunStateClaimPath(filePath) {
+  return `${filePath}.claim`;
+}
+
+export async function loadYardRunState(filePath, {
+  integritySecret = '',
+  requireSignature = Boolean(integritySecret),
+  expectedConfigDigest = '',
+  maxAgeMs = YARD_RUN_RECOVERY_MAX_AGE_MS,
+  now = Date.now,
+  consumeOnLoad = true,
+  clearRejected = true,
+} = {}) {
+  let candidate;
+  try {
+    candidate = await readYardRunStateCandidate(filePath, {
+      integritySecret,
+      requireSignature,
+      expectedConfigDigest,
+      maxAgeMs,
+      now,
+      source: 'yard-run state',
+    });
+  } catch (error) {
+    if (clearRejected) await clearYardRunState(filePath).catch(() => {});
+    throw error;
+  }
+  if (!candidate) return null;
+
+  try {
+    if (consumeOnLoad) await clearYardRunState(filePath);
+    return candidate.yardRun;
+  } catch (error) {
+    if (clearRejected) await clearYardRunState(filePath).catch(() => {});
+    throw error;
+  }
+}
+
+export async function claimYardRunState(filePath, {
+  integritySecret = '',
+  requireSignature = Boolean(integritySecret),
+  expectedConfigDigest = '',
+  maxAgeMs = YARD_RUN_RECOVERY_MAX_AGE_MS,
+  now = Date.now,
+} = {}) {
+  const claimPath = yardRunStateClaimPath(filePath);
+  const readOptions = {
+    integritySecret,
+    requireSignature,
+    expectedConfigDigest,
+    maxAgeMs,
+    now,
+  };
+  const [canonicalResult, claimResult] = await Promise.all([
+    inspectYardRunStateCandidate(filePath, { ...readOptions, source: 'yard-run state' }),
+    inspectYardRunStateCandidate(claimPath, { ...readOptions, source: 'yard-run state claim' }),
+  ]);
+
+  if (canonicalResult.error) await rm(filePath, { force: true }).catch(() => {});
+  if (claimResult.error) await rm(claimPath, { force: true }).catch(() => {});
+
+  let selected = null;
+  if (canonicalResult.candidate && claimResult.candidate) {
+    if (canonicalResult.candidate.savedAtMs >= claimResult.candidate.savedAtMs) {
+      await rm(claimPath, { force: true });
+      await rename(filePath, claimPath);
+      selected = canonicalResult.candidate;
+    } else {
+      await rm(filePath, { force: true });
+      selected = claimResult.candidate;
+    }
+  } else if (canonicalResult.candidate) {
+    await rm(claimPath, { force: true });
+    await rename(filePath, claimPath);
+    selected = canonicalResult.candidate;
+  } else if (claimResult.candidate) {
+    await rm(filePath, { force: true });
+    selected = claimResult.candidate;
+  }
+
+  if (!selected) {
+    const error = canonicalResult.error || claimResult.error;
+    if (error) throw error;
+    return null;
+  }
+  if (!selected.yardRun) {
+    await rm(claimPath, { force: true });
+    return null;
+  }
+
+  return Object.freeze({
+    claimPath,
+    savedAt: selected.snapshot.savedAt,
+    configDigest: selected.snapshot.configDigest,
+    snapshotDigest: selected.snapshotDigest,
+    yardRun: selected.yardRun,
+  });
+}
+
+export async function validateYardRunStateClaim(filePath, claim, {
+  integritySecret = '',
+  requireSignature = Boolean(integritySecret),
+  expectedConfigDigest = '',
+  maxAgeMs = YARD_RUN_RECOVERY_MAX_AGE_MS,
+  now = Date.now,
+  clearRejected = true,
+} = {}) {
+  const claimPath = yardRunStateClaimPath(filePath);
+  if (!claim || claim.claimPath !== claimPath || typeof claim.snapshotDigest !== 'string') {
+    throw new Error('yard-run state claim is missing or invalid');
+  }
+
+  try {
+    const candidate = await readYardRunStateCandidate(claimPath, {
+      integritySecret,
+      requireSignature,
+      expectedConfigDigest,
+      maxAgeMs,
+      now,
+      source: 'yard-run state claim',
+    });
+    if (!candidate || candidate.snapshotDigest !== claim.snapshotDigest) {
+      throw new Error('yard-run state claim changed before acknowledgment');
+    }
+    return candidate.yardRun;
+  } catch (error) {
+    if (clearRejected) await rm(claimPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+export async function acknowledgeYardRunStateClaim(filePath, claim, yardRun, {
+  integritySecret = '',
+  configDigest = '',
+  maxAgeMs = YARD_RUN_RECOVERY_MAX_AGE_MS,
+  now = Date.now,
+} = {}) {
+  await validateYardRunStateClaim(filePath, claim, {
+    integritySecret,
+    expectedConfigDigest: configDigest,
+    maxAgeMs,
+    now,
+  });
+
+  const claimPath = yardRunStateClaimPath(filePath);
+  if (yardRun && yardRun.status === 'running') {
+    await saveYardRunState(filePath, yardRun, { integritySecret, configDigest, now });
+    await rm(claimPath, { force: true });
+    return;
+  }
+
+  // A signed, newer idle tombstone prevents a crash between the canonical
+  // clear and claim removal from replaying the acknowledged queue.
+  await writeYardRunStateSnapshot(filePath, { status: 'idle' }, {
+    integritySecret,
+    configDigest,
+    now,
+  });
+  await rm(claimPath, { force: true });
+  await rm(filePath, { force: true });
+}
+
+export async function saveYardRunState(filePath, yardRun, {
+  integritySecret = '',
+  configDigest = '',
+  now = Date.now,
+} = {}) {
   if (!yardRun || yardRun.status === 'idle') {
     await clearYardRunState(filePath);
     return;
@@ -36,24 +198,37 @@ export async function saveYardRunState(filePath, yardRun, { integritySecret = ''
     await clearYardRunState(filePath);
     return;
   }
-
-  const snapshot = {
-    version: YARD_RUN_STATE_VERSION,
-    savedAt: new Date().toISOString(),
-    yardRun: normalized,
-  };
-  const signature = signYardRunState(snapshot, integritySecret);
-  if (signature) {
-    snapshot.signature = signature;
-  }
-  const tmpPath = `${filePath}.${process.pid}.tmp`;
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(tmpPath, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
-  await rename(tmpPath, filePath);
+  await writeYardRunStateSnapshot(filePath, normalized, { integritySecret, configDigest, now });
 }
 
 export async function clearYardRunState(filePath) {
   await rm(filePath, { force: true });
+}
+
+async function writeYardRunStateSnapshot(filePath, yardRun, {
+  integritySecret,
+  configDigest,
+  now,
+}) {
+  const savedAt = new Date(resolveNowMs(now, 'yard-run state save time')).toISOString();
+  const snapshot = {
+    version: YARD_RUN_STATE_VERSION,
+    savedAt,
+    configDigest: normalizeConfigDigest(configDigest, 'yard-run state config digest'),
+    yardRun,
+  };
+  const signature = signYardRunState(snapshot, integritySecret);
+  if (signature) snapshot.signature = signature;
+
+  const tmpPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  await mkdir(path.dirname(filePath), { recursive: true });
+  try {
+    await writeFile(tmpPath, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    await rename(tmpPath, filePath);
+  } catch (error) {
+    await rm(tmpPath, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 export function reconcileYardRunStateDevices(yardRun, devices) {
@@ -235,8 +410,114 @@ function signableSnapshot(snapshot) {
   return JSON.stringify({
     version: snapshot.version,
     savedAt: snapshot.savedAt,
+    configDigest: snapshot.configDigest,
     yardRun: snapshot.yardRun,
   });
+}
+
+async function inspectYardRunStateCandidate(filePath, options) {
+  try {
+    return { candidate: await readYardRunStateCandidate(filePath, options), error: null };
+  } catch (error) {
+    return { candidate: null, error };
+  }
+}
+
+async function readYardRunStateCandidate(filePath, {
+  integritySecret,
+  requireSignature,
+  expectedConfigDigest,
+  maxAgeMs,
+  now,
+  source,
+}) {
+  let serialized;
+  try {
+    serialized = await readFile(filePath, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw new Error(`Could not read ${source}: ${error.message}`);
+  }
+
+  let snapshot;
+  try {
+    snapshot = JSON.parse(serialized);
+  } catch (error) {
+    throw new Error(`Could not read ${source}: ${error.message}`);
+  }
+  if (requireSignature) {
+    verifyYardRunStateSignature(snapshot, integritySecret, source);
+  }
+  const { savedAtMs } = validateYardRunStateSnapshot(snapshot, {
+    expectedConfigDigest,
+    maxAgeMs,
+    now,
+    source,
+  });
+  return {
+    snapshot,
+    snapshotDigest: crypto.createHash(SIGNATURE_ALGORITHM).update(serialized).digest('hex'),
+    savedAtMs,
+    yardRun: normalizeYardRunState(snapshot, source),
+  };
+}
+
+function validateYardRunStateSnapshot(snapshot, {
+  expectedConfigDigest,
+  maxAgeMs,
+  now,
+  source,
+}) {
+  if (!isPlainObject(snapshot) || !isPlainObject(snapshot.yardRun)) {
+    throw new Error(`${source} must be a version ${YARD_RUN_STATE_VERSION} snapshot`);
+  }
+  if (snapshot.version !== YARD_RUN_STATE_VERSION) {
+    throw new Error(`${source} version ${snapshot.version ?? 'missing'} is not supported`);
+  }
+
+  const actualConfigDigest = normalizeConfigDigest(snapshot.configDigest, `${source} config digest`);
+  const requiredConfigDigest = normalizeConfigDigest(expectedConfigDigest, 'expected yard-run config digest');
+  if (!safeHexEqual(actualConfigDigest, requiredConfigDigest)) {
+    throw new Error(`${source} does not match the current yard-run config`);
+  }
+
+  const savedAtMs = Date.parse(normalizeOptionalString(snapshot.savedAt));
+  if (!Number.isFinite(savedAtMs)) {
+    throw new Error(`${source} savedAt must be a valid timestamp`);
+  }
+  const nowMs = resolveNowMs(now, `${source} current time`);
+  const recoveryAgeMs = Number(maxAgeMs);
+  if (!Number.isFinite(recoveryAgeMs) || recoveryAgeMs <= 0) {
+    throw new Error(`${source} maxAgeMs must be a positive number`);
+  }
+  if (savedAtMs > nowMs) {
+    throw new Error(`${source} savedAt cannot be in the future`);
+  }
+  if (nowMs - savedAtMs > recoveryAgeMs) {
+    throw new Error(`${source} is too old to recover automatically`);
+  }
+  return { savedAtMs };
+}
+
+function normalizeConfigDigest(value, source) {
+  const normalized = normalizeOptionalString(value).toLowerCase();
+  if (!SHA256_HEX_PATTERN.test(normalized)) {
+    throw new Error(`${source} must be a SHA-256 hex digest`);
+  }
+  return normalized;
+}
+
+function resolveNowMs(now, source) {
+  const value = typeof now === 'function' ? now() : now;
+  const timestamp = value instanceof Date ? value.getTime() : Number(value);
+  if (!Number.isFinite(timestamp) || !Number.isFinite(new Date(timestamp).getTime())) {
+    throw new Error(`${source} must be a valid time`);
+  }
+  return timestamp;
+}
+
+function safeHexEqual(actual, expected) {
+  return crypto.timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expected, 'hex'));
 }
 
 function safeSignatureEqual(actual, expected) {

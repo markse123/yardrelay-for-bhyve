@@ -1,6 +1,6 @@
 # Source Provenance
 
-YardRelay is a separately maintained local-controller implementation informed by documented behavior and by review of permissively licensed community projects. Research clones, captured account data, upstream fixtures, vendor artwork, and third-party brand assets are excluded from the audited clean export and release artifacts.
+The canonical [`markse123/yardrelay-for-bhyve`](https://github.com/markse123/yardrelay-for-bhyve) repository is YardRelay's fresh-history public-source boundary. YardRelay is a separately maintained local-controller implementation informed by documented behavior and by review of permissively licensed community projects. Research clones, captured account data, upstream fixtures, vendor artwork, and third-party brand assets are excluded from this repository and its release artifacts.
 
 ## Reviewed snapshots
 
@@ -17,6 +17,6 @@ The license notices for these snapshots are preserved in [`THIRD_PARTY_NOTICES.m
 
 ## Clean repository boundary
 
-The current private development repository once contained local research copies in historical commits. Rewriting or making that history public would create avoidable privacy and attribution risk. The eventual `yardrelay-for-bhyve` repository must therefore be a separate repository with fresh history, created private, populated only from an audited export, and kept private until its owner explicitly changes visibility.
+The earlier private development repository once contained local research copies in historical commits. Rewriting or publishing that history would create avoidable privacy and attribution risk, so it must remain private. This repository was created separately with fresh history. Its root commit, `b864287de7ac398042e20b5cfecc754d195a1f58` (`Initialize YardRelay foundation`), was prepared from and audited against private development revision `1f5136a5e70cf9c081b0fdbc1c535675212844a1`. The two trees are not byte-identical: the clean boundary is a curated public-source tree, not an exact copy. Do not join, rebase, merge, or import Git objects from the earlier repository into this one.
 
-Before export, verify that no ignored local files, account data, device identifiers, property-specific recipes, snapshots, logs, build products, research clones, or third-party brand assets are present. The export must retain the project license, this provenance record, and all applicable third-party notices.
+Fresh history establishes the repository boundary but does not make later commits safe automatically. Before changing visibility and before each release, verify that no ignored local files, account data, device identifiers, property-specific recipes, snapshots, logs, build products, research clones, or third-party brand assets are present in the repository or release artifacts. Retain the project license, this provenance record, and all applicable third-party notices.

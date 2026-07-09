@@ -264,6 +264,38 @@ test('multiword private assignments stop before the next assignment or delimiter
   }
 });
 
+test('compound credential assignments are redacted in free-form and JSON-shaped diagnostics', () => {
+  const privateValues = [
+    'synthetic-access-value',
+    'synthetic-camel-value',
+    'synthetic-session-value',
+    'synthetic-secret-value',
+    'synthetic-api-value',
+  ];
+  const input = [
+    `access_token=${privateValues[0]}`,
+    `accessToken: ${privateValues[1]}`,
+    `session-token=${privateValues[2]}`,
+    `clientSecret='${privateValues[3]}'`,
+    `{\"apiKey\":\"${privateValues[4]}\"}`,
+  ].join(' ');
+
+  const sanitized = sanitizeDiagnosticText(input);
+
+  for (const privateValue of privateValues) {
+    assert.equal(sanitized.includes(privateValue), false);
+  }
+  assert.match(sanitized, /access_token=\[redacted\]/);
+  assert.match(sanitized, /accessToken: \[redacted\]/);
+  assert.match(sanitized, /session-token=\[redacted\]/);
+  assert.match(sanitized, /clientSecret=\[redacted\]/);
+  assert.match(sanitized, /apiKey\":\[redacted\]/);
+  assert.equal(
+    sanitizeDiagnosticText('refresh_token=https://example.invalid/a:b'),
+    'refresh_token=[redacted]',
+  );
+});
+
 test('structured diagnostics never invoke getters or toJSON and remain JSON-safe', () => {
   let getterCalls = 0;
   let toJsonCalls = 0;
@@ -470,4 +502,19 @@ test('dashboard diagnostics expose stable, keyboard-accessible inspection contro
   assert.match(server, /addEvent\('warn', requestError\)/);
   assert.match(server, /clearTimeout\(refreshSoonTimer\)/);
   assert.doesNotMatch(server, /rain delay (?:cleared )?for \$\{deviceName\}/);
+});
+
+test('dashboard behavior remains compatible with its strict style CSP', async () => {
+  const [script, styles] = await Promise.all([
+    readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../public/styles.css', import.meta.url), 'utf8'),
+  ]);
+
+  assert.doesNotMatch(script, /\bstyle\s*=/i);
+  assert.doesNotMatch(script, /\.style(?:\.|\[)/);
+  assert.match(script, /<progress class="active-zone-progress"[^>]+value=/);
+  assert.match(script, /<progress class="yard-run-progress"[^>]+value=/);
+  assert.match(script, /textarea\.className = 'clipboard-copy-fallback'/);
+  assert.match(script, /async function apiGet\(path\)[\s\S]*headers: readHeaders\(\)/);
+  assert.match(styles, /\.clipboard-copy-fallback\s*\{/);
 });

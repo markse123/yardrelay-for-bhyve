@@ -47,6 +47,15 @@ test('local HTTP service proves its identity without disclosing APP_TOKEN', { ti
 
   await waitForHttp(`http://127.0.0.1:${port}/api/config`, child, () => output);
 
+  for (const pathname of ['/', '/help/index.html']) {
+    const page = await fetch(`http://127.0.0.1:${port}${pathname}`);
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
+    assert.equal(page.headers.get('x-frame-options'), 'DENY');
+    assert.equal(page.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
+  }
+
   const anonymousConfig = await getJson(`http://127.0.0.1:${port}/api/config`);
   assert.equal(anonymousConfig.response.status, 200);
   assert.equal(anonymousConfig.data.writeAccess, false);
@@ -89,7 +98,23 @@ test('local HTTP service proves its identity without disclosing APP_TOKEN', { ti
   assert.equal(authorizedWrite.status, 409);
   assert.match((await authorizedWrite.json()).error, /Orbit credentials are not configured/);
 
+  const otherPort = port === 65_535 ? port - 1 : port + 1;
+  for (const origin of [`http://127.0.0.1:${otherPort}`, `https://127.0.0.1:${port}`]) {
+    const rejectedWrite = await fetch(`http://127.0.0.1:${port}/api/refresh`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: origin,
+        'X-App-Token': appToken,
+      },
+      body: '{}',
+    });
+    assert.equal(rejectedWrite.status, 403);
+    assert.match((await rejectedWrite.json()).error, /Untrusted request origin/);
+  }
+
   const challenge = crypto.randomBytes(CONTROLLER_CHALLENGE_BYTES).toString('base64url');
+  const controllerOrigin = `http://127.0.0.1:${port}`;
   const identity = await getJson(
     `http://127.0.0.1:${port}/api/identity?challenge=${encodeURIComponent(challenge)}`,
   );
@@ -97,8 +122,9 @@ test('local HTTP service proves its identity without disclosing APP_TOKEN', { ti
   assert.deepEqual(identity.data, {
     service: CONTROLLER_SERVICE_NAME,
     protocolVersion: CONTROLLER_PROTOCOL_VERSION,
+    origin: controllerOrigin,
     challenge,
-    proof: createControllerProof(appToken, challenge, 'identity'),
+    proof: createControllerProof(appToken, challenge, 'identity', controllerOrigin),
   });
 
   const logsAfterSuccessfulProbe = await getJson(`http://127.0.0.1:${port}/api/logs`);
@@ -128,18 +154,34 @@ test('local HTTP service proves its identity without disclosing APP_TOKEN', { ti
     headers: {
       'Content-Type': 'application/json',
       'X-Controller-Challenge': challenge,
-      'X-Controller-Proof': createControllerProof(appToken, challenge, 'identity'),
+      'X-Controller-Proof': createControllerProof(appToken, challenge, 'identity', controllerOrigin),
     },
     body: '{}',
   });
   assert.equal(wrongPurpose.status, 403);
+
+  const wrongEndpoint = await fetch(`http://127.0.0.1:${port}/api/shutdown`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Controller-Challenge': challenge,
+      'X-Controller-Proof': createControllerProof(
+        appToken,
+        challenge,
+        'shutdown',
+        `http://127.0.0.1:${port === 65_535 ? port - 1 : port + 1}`,
+      ),
+    },
+    body: '{}',
+  });
+  assert.equal(wrongEndpoint.status, 403);
 
   const shutdown = await fetch(`http://127.0.0.1:${port}/api/shutdown`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-Controller-Challenge': challenge,
-      'X-Controller-Proof': createControllerProof(appToken, challenge, 'shutdown'),
+      'X-Controller-Proof': createControllerProof(appToken, challenge, 'shutdown', controllerOrigin),
     },
     body: '{}',
   });
@@ -206,6 +248,30 @@ test('default local mode allows loopback controls without disclosing APP_TOKEN',
   });
   assert.equal(crossOriginWrite.status, 403);
   assert.match((await crossOriginWrite.json()).error, /Untrusted request origin/);
+
+  const crossSiteHistory = await fetch(`http://127.0.0.1:${port}/api/history?hours=1`, {
+    headers: { 'Sec-Fetch-Site': 'cross-site' },
+  });
+  assert.equal(crossSiteHistory.status, 403);
+  assert.match((await crossSiteHistory.json()).error, /Cross-site browser requests are not allowed/);
+
+  const wrongOriginHistory = await fetch(`http://127.0.0.1:${port}/api/history?hours=1`, {
+    headers: { Origin: `https://127.0.0.1:${port}` },
+  });
+  assert.equal(wrongOriginHistory.status, 403);
+  assert.match((await wrongOriginHistory.json()).error, /Untrusted request origin/);
+
+  const localHistory = await fetch(`http://127.0.0.1:${port}/api/history?hours=1`, {
+    headers: { Origin: `http://127.0.0.1:${port}` },
+  });
+  assert.equal(localHistory.status, 409);
+  assert.match((await localHistory.json()).error, /Orbit credentials are not configured/);
+
+  const throttledHistory = await fetch(`http://127.0.0.1:${port}/api/history?hours=2`, {
+    headers: { Origin: `http://127.0.0.1:${port}` },
+  });
+  assert.equal(throttledHistory.status, 429);
+  assert.match((await throttledHistory.json()).error, /refreshed recently/);
 });
 
 async function getJson(url, headers = {}) {

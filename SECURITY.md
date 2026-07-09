@@ -6,11 +6,20 @@ YardRelay is intended for one trusted user's local operation. The default server
 
 Do not expose this controller directly to the public internet. `WRITE_ACCESS_MODE=protected` is an extra local-control safeguard, not public-internet authentication. If remote access is needed later, put a reviewed authentication layer, TLS, and rate limiting in front of it first.
 
-YardRelay collects no telemetry. Account credentials, app tokens, device identifiers, watering recipes, snapshots, and diagnostics stay local unless the user deliberately shares them.
+YardRelay does not send project-operated telemetry or analytics. To provide its controller features, it sends Orbit account credentials to Orbit's login service and exchanges account and device state, device identifiers, and control commands with Orbit's cloud API and event service. The YardRelay app token, local watering recipes, snapshots, and diagnostics stay local unless the user deliberately shares them.
+
+## Supported Versions
+
+| Version | Security support |
+| --- | --- |
+| Unreleased `main` development branch | Active development; not a public supported release |
+| Public YardRelay releases | None published or supported yet |
+
+After the first public beta is published, only the latest published beta will receive security fixes. Users will need to upgrade to that beta before expecting a fix. The private advisory form below is the canonical route for every security report, including reports against unreleased development code.
 
 ## Reporting Issues
 
-Report security issues privately through GitHub security advisories if available, or contact the repository owner directly. Do not include Orbit credentials, app tokens, home addresses, screenshots with private location data, raw request logs, or property-specific watering recipes in a public issue.
+Use this repository's [GitHub private vulnerability reporting form](https://github.com/markse123/yardrelay-for-bhyve/security/advisories/new) to report security issues privately. If GitHub private reporting is unavailable, open a public issue containing no vulnerability details or private data and ask the owner to enable a private reporting channel before sharing the report. Do not include Orbit credentials, app tokens, home addresses, screenshots with private location data, raw request logs, or property-specific watering recipes in a public issue.
 
 ## Secret Handling
 
@@ -20,12 +29,14 @@ Report security issues privately through GitHub security advisories if available
 
 ## Public Release Checklist
 
-The current development repository and its historical research commits must remain private. Before making any YardRelay repository public:
+The earlier development repository and its historical research commits must remain private. This `yardrelay-for-bhyve` repository is the separately created fresh-history release boundary. Keep it private until its clean-source boundary and every remaining release gate have been reviewed and the owner explicitly approves changing its visibility.
 
 - Confirm property-specific watering-run recipes, controller names, and Orbit device IDs are only present in ignored local files.
-- Publish only from the separately audited `yardrelay-for-bhyve` repository with fresh history. Create that repository as private first and change visibility only after an explicit human decision.
+- Publish only from this `yardrelay-for-bhyve` repository. Do not import branches, tags, commits, or other Git objects from the earlier development repository.
+- Review every author and committer name and email in the history that will become public. Explicitly approve the identities that are intentional, and rewrite unintended employer or personal email disclosure in this clean repository before changing visibility.
 - Do not commit local research clones or raw upstream fixtures; keep attribution in `README.md` and preserve upstream licenses when reusing source.
 - Remove or sanitize copied fixtures that contain real-looking addresses, device IDs, MAC addresses, account IDs, or location data.
 - Remove any private snapshots, logs, screenshots, addresses, or generated bundles.
 - Confirm CI, dependency updates, and secret scanning are enabled in GitHub.
+- Confirm GitHub private vulnerability reporting is enabled and the reporting link above works without revealing report contents publicly.
 - Confirm [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), [docs/provenance.md](docs/provenance.md), and [docs/public-release-plan.md](docs/public-release-plan.md) are current.
