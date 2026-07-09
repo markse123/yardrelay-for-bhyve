@@ -135,6 +135,11 @@ public sealed class ServerController : IDisposable
         DesktopSecrets secrets,
         CancellationToken cancellationToken = default)
     {
+        if (!AppTokenPolicy.TryNormalize(secrets.AppToken, out var appToken))
+        {
+            return new ControllerProbeResult(ControllerProbeStatus.Untrusted);
+        }
+
         var challenge = ServiceIdentity.CreateChallenge();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
@@ -160,7 +165,7 @@ public sealed class ServerController : IDisposable
                 && string.Equals(identity.Challenge, challenge, StringComparison.Ordinal)
                 && string.Equals(identity.Origin, expectedOrigin, StringComparison.Ordinal)
                 && ServiceIdentity.VerifyProof(
-                    secrets.AppToken,
+                    appToken,
                     challenge,
                     ServiceIdentity.IdentityPurpose,
                     expectedOrigin,
@@ -574,11 +579,16 @@ public sealed class ServerController : IDisposable
 
     private static DesktopSecrets SnapshotSecrets(DesktopSecrets source)
     {
+        if (!AppTokenPolicy.TryNormalize(source.AppToken, out var appToken))
+        {
+            throw new InvalidOperationException("The app token is unsafe. Open Desktop setup and save again.");
+        }
+
         return new DesktopSecrets
         {
             OrbitEmail = source.OrbitEmail,
             OrbitPassword = source.OrbitPassword,
-            AppToken = source.AppToken,
+            AppToken = appToken,
         };
     }
 

@@ -5,6 +5,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
+  APP_TOKEN_GENERATED_BYTES,
+  resolveAppToken,
+} from '../public/app-token-policy.js';
+import {
   sanitizeDiagnosticMessage,
   sanitizeDiagnosticPath,
   sanitizeDiagnosticText,
@@ -36,8 +40,21 @@ import {
   writeTokenRequiredForClient,
 } from './security.js';
 import { resolveRuntimePaths } from './runtime-config.js';
+import { mapWithConcurrency } from './bounded-map.js';
+import {
+  safeJsonStringify,
+  sanitizeJsonValue,
+  strictJsonClone,
+  strictJsonStringify,
+} from './safe-json.js';
 import { loadWateringRuns } from './yard-run-config.js';
+import {
+  createYardRunStopCoordinator,
+  findYardRunRecipeDevice as findConfiguredYardRunRecipeDevice,
+  stopYardRunDurably,
+} from './yard-run-runtime.js';
 import { SseClientRegistry } from './sse-clients.js';
+import { createSseFrame } from './sse-frame.js';
 import {
   acknowledgeYardRunStateClaim,
   claimYardRunState,
@@ -70,7 +87,12 @@ const {
 
 const HOST = env.HOST || '127.0.0.1';
 const PORT = Number(env.PORT || 3030);
-const APP_TOKEN = env.APP_TOKEN || crypto.randomBytes(24).toString('hex');
+const appTokenResolution = resolveAppToken({
+  hasExplicitValue: Object.hasOwn(env, 'APP_TOKEN'),
+  explicitValue: env.APP_TOKEN,
+  generateToken: () => crypto.randomBytes(APP_TOKEN_GENERATED_BYTES).toString('hex'),
+});
+const APP_TOKEN = appTokenResolution.token;
 const WRITE_ACCESS_MODE = parseWriteAccessMode(env.WRITE_ACCESS_MODE);
 const TRUSTED_HOSTS = buildTrustedHosts({ host: HOST, trustedHosts: env.TRUSTED_HOSTS });
 const TRUSTED_ORIGINS = buildTrustedOrigins({ trustedHosts: TRUSTED_HOSTS, port: PORT });
@@ -103,6 +125,7 @@ const HISTORY_CACHE_TTL_MS = 30_000;
 const HISTORY_REQUEST_DEADLINE_MS = 45_000;
 const HISTORY_BUILD_COOLDOWN_MS = 5_000;
 const MAX_HISTORY_CACHE_ENTRIES = 4;
+const HISTORY_DEVICE_CONCURRENCY = 4;
 const RAIN_DELAY_VERIFY_DELAYS_MS = [1000, 2000, 3500];
 const MAX_REQUEST_LOGS = 250;
 const MAX_STATUS_ERROR_LENGTH = 1200;
@@ -137,6 +160,7 @@ let shuttingDown = false;
 let yardRun = createIdleYardRun();
 let yardRunNeedsRecovery = false;
 let yardRunRecoveryClaim = null;
+const yardRunStopCoordinator = createYardRunStopCoordinator(performStopYardRun);
 let state = {
   status: {
     configured: Boolean(env.ORBIT_EMAIL && env.ORBIT_PASSWORD),
@@ -216,7 +240,7 @@ server.listen(PORT, HOST, () => {
   if (WRITE_ACCESS_MODE === 'trusted-network') {
     console.warn('Trusted-network mode disables browser write tokens and is an unsupported private-development compatibility option.');
   }
-  if (!env.APP_TOKEN) {
+  if (appTokenResolution.generated) {
     console.log('APP_TOKEN was not set; generated a temporary token for this server run.');
   }
 });
@@ -244,6 +268,7 @@ async function route(req, res) {
   }
 
   if (url.pathname === '/api/identity' && req.method === 'GET') {
+    requireTrustedBrowserRead(req);
     if (!isLocalRequest(req)) {
       throw newHttpError(403, 'Controller identity is only available over loopback');
     }
@@ -279,6 +304,7 @@ async function route(req, res) {
   }
 
   if (url.pathname === '/api/events' && req.method === 'GET') {
+    requireTrustedBrowserRead(req);
     return openSse(req, res);
   }
 
@@ -318,7 +344,7 @@ async function route(req, res) {
 
   if (url.pathname === '/api/yard-runs/stop' && req.method === 'POST') {
     requireWriteAccess(req);
-    const nextYardRun = stopYardRun();
+    const nextYardRun = await stopYardRun();
     return sendJson(res, 202, { ok: true, yardRun: nextYardRun });
   }
 
@@ -434,15 +460,23 @@ async function connectOrbit() {
 
 function wireOrbit(client) {
   client.on('message', (message) => {
-    addEvent('orbit', message.event || 'Orbit event', message);
-    const deviceStateChanged = applyOrbitDeviceEvent(message);
-    if (shouldRefreshAfterOrbitEvent(message)) {
+    let safeMessage;
+    try {
+      safeMessage = strictJsonClone(message);
+    } catch {
+      addEvent('warn', 'Ignored an Orbit event payload that exceeded safe limits');
+      broadcastState();
+      return;
+    }
+    addEvent('orbit', safeMessage?.event || 'Orbit event', safeMessage);
+    const deviceStateChanged = applyOrbitDeviceEvent(safeMessage);
+    if (shouldRefreshAfterOrbitEvent(safeMessage)) {
       refreshSoon();
     }
     if (deviceStateChanged) {
       broadcastState();
     }
-    broadcast('orbit-message', message);
+    broadcast('orbit-message', safeMessage);
   });
   client.on('stream-state', (streamState) => {
     state.status.streamConnected = streamState === 'running';
@@ -455,7 +489,8 @@ function wireOrbit(client) {
     broadcastState();
   });
   client.on('log', (entry) => {
-    addEvent(entry.level || 'info', entry.message || 'Orbit log', entry);
+    const safeEntry = sanitizeJsonValue(entry);
+    addEvent(safeEntry?.level || 'info', safeEntry?.message || 'Orbit log', safeEntry);
     broadcastState();
   });
   client.on('request-log', (entry) => addLog(entry));
@@ -569,13 +604,12 @@ async function performRefreshState({ forceLogin = false } = {}) {
     orbit.closeStream();
     return currentState();
   }
-  state.status.authenticated = orbit.authenticated;
   const [devices, programs] = await Promise.all([orbit.devices(), orbit.programs()]);
   if (shuttingDown) {
     orbit.closeStream();
     return currentState();
   }
-  state = {
+  const nextState = strictJsonClone({
     ...state,
     status: {
       ...state.status,
@@ -589,8 +623,10 @@ async function performRefreshState({ forceLogin = false } = {}) {
     },
     devices: Array.isArray(devices) ? devices : [],
     programs: Array.isArray(programs) ? programs : [],
+    yardRun: describeYardRun(),
     recentEvents,
-  };
+  });
+  state = { ...nextState, recentEvents };
   await resumeRecoveredYardRun();
   state.yardRun = describeYardRun();
   broadcastState();
@@ -601,6 +637,7 @@ async function performRefreshState({ forceLogin = false } = {}) {
 }
 
 function startOrAppendYardRun(runKey, { minutes }) {
+  yardRunStopCoordinator.requireMutationAllowed();
   ensureOrbitReady();
   const run = requireWateringRun(runKey);
   const steps = resolveYardRunSteps(runKey, { minutes });
@@ -643,24 +680,32 @@ function startOrAppendYardRun(runKey, { minutes }) {
 }
 
 function stopYardRun() {
-  ensureOrbitReady();
-  clearTimeout(yardRunTimer);
-  yardRunTimer = null;
+  return yardRunStopCoordinator.stop();
+}
 
-  if (yardRun.status === 'idle') {
-    return describeYardRun();
-  }
-
-  const currentStep = yardRun.currentStep;
-  if (currentStep) {
-    stopYardStep(currentStep);
-    addEvent('action', `Stopped yard run during ${currentStep.zoneName}`);
-  } else {
-    addEvent('action', 'Stopped yard run');
-  }
-
-  yardRun = createIdleYardRun('Stopped yard run');
-  persistYardRunState();
+async function performStopYardRun() {
+  if (yardRun.currentStep) ensureOrbitReady();
+  const result = await stopYardRunDurably({
+    yardRun,
+    stopZone: (step) => orbit.stopZone({ deviceId: step.deviceId }),
+    stopTimer: () => {
+      clearTimeout(yardRunTimer);
+      yardRunTimer = null;
+    },
+    persistIdle: (idleYardRun) => persistYardRunState({
+      acknowledgeRecovery: true,
+      stateToPersist: idleYardRun,
+    }),
+    createIdle: createIdleYardRun,
+    clearWateringStatus: clearYardStepWateringStatus,
+  });
+  yardRun = result.yardRun;
+  addEvent(
+    'action',
+    result.stoppedStep
+      ? `Stopped yard run during ${result.stoppedStep.zoneName}`
+      : 'Stopped yard run',
+  );
   broadcastState();
   refreshSoon();
   return describeYardRun();
@@ -723,7 +768,12 @@ function completeCurrentYardStep() {
     return;
   }
 
-  stopYardStep(completedStep);
+  try {
+    stopYardStep(completedStep);
+  } catch (error) {
+    logError('Failed to stop a configured yard-run zone', error);
+    return;
+  }
   yardRun.completedSteps.push({
     ...completedStep,
     completedAt: new Date().toISOString(),
@@ -747,11 +797,7 @@ function finishYardRun() {
 }
 
 function stopYardStep(step) {
-  try {
-    orbit.stopZone({ deviceId: step.deviceId });
-  } catch (error) {
-    logError('Failed to stop a configured yard-run zone', error);
-  }
+  orbit.stopZone({ deviceId: step.deviceId });
   clearYardStepWateringStatus(step);
 }
 
@@ -909,8 +955,10 @@ function remainingYardStepMs(step) {
   return step.minutes * 60 * 1000;
 }
 
-function persistYardRunState({ acknowledgeRecovery = false } = {}) {
-  const snapshot = yardRun.status === 'running' ? cloneYardRunForPersistence(yardRun) : null;
+function persistYardRunState({ acknowledgeRecovery = false, stateToPersist = yardRun } = {}) {
+  const snapshot = stateToPersist.status === 'running'
+    ? cloneYardRunForPersistence(stateToPersist)
+    : null;
   const recoveryClaim = acknowledgeRecovery ? yardRunRecoveryClaim : null;
   const operation = yardRunPersistQueue
     .catch(() => {})
@@ -941,7 +989,7 @@ function persistYardRunState({ acknowledgeRecovery = false } = {}) {
 }
 
 function cloneYardRunForPersistence(value) {
-  return JSON.parse(JSON.stringify(value));
+  return strictJsonClone(value);
 }
 
 function createIdleYardRun(message = null) {
@@ -1033,9 +1081,7 @@ function resolveYardRunRecipeStep(recipe, { runKey, minutes }) {
 }
 
 function findYardRunRecipeDevice(recipe) {
-  return findDevice(recipe.deviceId)
-    || state.devices.find((device) => device.name === recipe.deviceName)
-    || null;
+  return findConfiguredYardRunRecipeDevice(state.devices, recipe);
 }
 
 function describeYardRun() {
@@ -1209,7 +1255,7 @@ async function buildZoneHistory({ hours, signal }) {
   const until = new Date();
   const since = new Date(until.getTime() - hours * 60 * 60 * 1000);
   const devices = (state.devices || []).filter((device) => getDeviceId(device) && normalizeZones(device).length > 0);
-  const results = await Promise.all(devices.map(async (device) => {
+  const results = await mapWithConcurrency(devices, HISTORY_DEVICE_CONCURRENCY, async (device) => {
     try {
       return await fetchDeviceHistory(device, {
         sinceMs: since.getTime(),
@@ -1228,7 +1274,7 @@ async function buildZoneHistory({ hours, signal }) {
         },
       };
     }
-  }));
+  }, { signal });
 
   const allEvents = results
     .flatMap((result) => result.events)
@@ -1617,20 +1663,13 @@ async function saveSnapshot(action, id, payload) {
   const safeId = String(id).replace(/[^a-zA-Z0-9_.-]/g, '_');
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const filePath = path.join(snapshotDir, `${stamp}-${action}-${safeId}-${crypto.randomUUID()}.json`);
-  await writeFile(
-    filePath,
-    `${JSON.stringify(
-      {
-        action,
-        id,
-        savedAt: new Date().toISOString(),
-        payload,
-      },
-      null,
-      2,
-    )}\n`,
-    { mode: 0o600, flag: 'wx' },
-  );
+  const serialized = strictJsonStringify({
+    action,
+    id,
+    savedAt: new Date().toISOString(),
+    payload,
+  }, { space: 2 });
+  await writeFile(filePath, `${serialized}\n`, { mode: 0o600, flag: 'wx' });
 }
 
 function findProgram(programId) {
@@ -1761,13 +1800,14 @@ async function readJson(req) {
 }
 
 function sendJson(res, statusCode, payload) {
+  const serialized = safeJsonStringify(payload);
   finishHttpRequestLog(res, statusCode, payload);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     ...browserSecurityHeaders(),
   });
-  res.end(JSON.stringify(payload));
+  res.end(serialized);
 }
 
 async function serveStatic(requestPath, res) {
@@ -1813,8 +1853,16 @@ function openSse(req, res) {
     res.destroy();
     return;
   }
-  if (!clients.write(client, `event: state\ndata: ${JSON.stringify(currentState())}\n\n`)) return;
-  clients.write(client, `event: request-logs\ndata: ${JSON.stringify({ logs: recentLogs })}\n\n`);
+  const stateFrame = createSseFrame('state', currentState(), { maxBytes: MAX_SSE_BUFFER_BYTES });
+  if (!stateFrame) {
+    res.destroy();
+    return;
+  }
+  if (!clients.write(client, stateFrame)) return;
+  const logsFrame = createSseFrame('request-logs', { logs: recentLogs }, {
+    maxBytes: MAX_SSE_BUFFER_BYTES,
+  });
+  if (logsFrame) clients.write(client, logsFrame);
 }
 
 function browserSecurityHeaders() {
@@ -1837,17 +1885,31 @@ function broadcastState() {
 }
 
 function broadcast(event, payload) {
-  const frame = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
-  clients.broadcast(frame);
+  const frame = createSseFrame(event, payload, { maxBytes: MAX_SSE_BUFFER_BYTES });
+  if (frame) clients.broadcast(frame);
 }
 
 function addEvent(level, message, detail = null) {
+  const messageLimits = {
+    maxDepth: 5,
+    maxNodes: 100,
+    maxArrayItems: 20,
+    maxObjectKeys: 20,
+    maxStringBytes: 1_000,
+    maxTotalStringBytes: 1_000,
+    maxOutputBytes: 1_000,
+  };
+  const safeMessage = typeof message === 'string'
+    ? sanitizeJsonValue(message, messageLimits)
+    : safeJsonStringify(message, messageLimits);
   const entry = {
     id: crypto.randomUUID(),
     at: new Date().toISOString(),
-    level,
-    message: typeof message === 'string' ? message : JSON.stringify(message),
-    detail,
+    level: typeof level === 'string'
+      ? sanitizeJsonValue(level, { maxStringBytes: 80, maxTotalStringBytes: 80 })
+      : 'info',
+    message: safeMessage,
+    detail: detail === null ? null : '[omitted]',
   };
   recentEvents.unshift(entry);
   recentEvents.splice(80);
@@ -1855,7 +1917,7 @@ function addEvent(level, message, detail = null) {
 }
 
 function addLog(entry) {
-  const normalized = sanitizeDiagnosticLogEntry(entry, {
+  const normalized = sanitizeDiagnosticLogEntry(sanitizeJsonValue(entry), {
     defaultId: crypto.randomUUID(),
     defaultAt: new Date().toISOString(),
   });
@@ -1973,7 +2035,7 @@ function summarizeLocalResponse(pathname, payload) {
 
 function summarizePayload(value) {
   if (value === undefined) return null;
-  const scrubbed = sanitizeDiagnosticValue(value);
+  const scrubbed = sanitizeDiagnosticValue(sanitizeJsonValue(value));
   const text = safeJson(scrubbed);
   if (text.length <= 2200) return scrubbed;
   return {
@@ -2003,11 +2065,7 @@ function normalizeClientAddress(address) {
 }
 
 function safeJson(value) {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
+  return safeJsonStringify(value);
 }
 
 function logError(message, error) {
@@ -2088,12 +2146,13 @@ function loadEnv(filePath) {
   const file = readFileSync(filePath, 'utf8');
   const parsed = {};
   for (const line of file.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const equals = trimmed.indexOf('=');
+    const inspected = line.trim();
+    if (!inspected || inspected.startsWith('#')) continue;
+    const equals = line.indexOf('=');
     if (equals === -1) continue;
-    const key = trimmed.slice(0, equals).trim();
-    let value = trimmed.slice(equals + 1).trim();
+    const key = line.slice(0, equals).trim();
+    const rawValue = line.slice(equals + 1);
+    let value = key === 'APP_TOKEN' ? rawValue : rawValue.trim();
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }

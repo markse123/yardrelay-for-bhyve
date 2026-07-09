@@ -229,7 +229,7 @@
             </li>
             <li>
               <strong>Create local configuration.</strong>
-              <span>Copy <code>.env.example</code> to <code>.env</code>, then add your Orbit email, password, and a long random app token.</span>
+              <span>Copy <code>.env.example</code> to <code>.env</code>, then add your Orbit email, password, and replace the rejected app-token sample with 32 random bytes encoded as 64 hexadecimal characters, such as the output of <code>openssl rand -hex 32</code>.</span>
             </li>
             <li>
               <strong>Build or run the wrapper.</strong>
@@ -391,13 +391,13 @@
               <dd>Windows exposes setup settings and the per-user configuration folder. macOS currently uses the source-checkout configuration.</dd>
             </div>
             <div>
-              <dt>Release checks</dt>
-              <dd>Remain disabled while the clean-history project repository is private and until its public release destination has been verified. The app does not silently download or install updates.</dd>
+              <dt>Project releases</dt>
+              <dd>The bundled guide opens the canonical YardRelay release page in the system browser. The page may contain no beta yet. The app does not silently poll, download, or install updates.</dd>
             </div>
           </dl>
           <p class="link-row">
 <!-- BEGIN GENERATED:RELEASE-LINK -->
-            <span>Release checks will be enabled after this clean-history repository is public and its release destination is verified.</span>
+            <a href="https://github.com/markse123/yardrelay-for-bhyve/releases" target="_blank" rel="noopener noreferrer">Check project releases</a>
 <!-- END GENERATED:RELEASE-LINK -->
           </p>
         </section>
@@ -492,14 +492,14 @@
             <div><dt><code>ORBIT_EMAIL</code> / <code>ORBIT_PASSWORD</code></dt><dd>Orbit account credentials. Keep them backend-only.</dd></div>
             <div><dt><code>HOST</code></dt><dd>Use <code>127.0.0.1</code> for the default local-only deployment.</dd></div>
             <div><dt><code>PORT</code></dt><dd>Local controller port, normally <code>3030</code>.</dd></div>
-            <div><dt><code>APP_TOKEN</code></dt><dd>A long random local token required for protected browser writes and desktop service verification.</dd></div>
+            <div><dt><code>APP_TOKEN</code></dt><dd>A 32–512 character printable ASCII token required for protected browser writes and desktop service verification. The published sample placeholder is rejected and stops startup until replaced.</dd></div>
             <div><dt><code>BHYVE_DATA_DIR</code></dt><dd>Optional desktop path for snapshots and active yard-run state.</dd></div>
             <div><dt><code>YARD_RUN_CONFIG</code></dt><dd>Optional path to the local property-specific yard-run recipe.</dd></div>
           </dl>
 
           <h3>Where desktop data lives</h3>
           <ul>
-            <li><strong>Windows:</strong> settings, config, data, and logs live under <code>%LOCALAPPDATA%\YardRelay</code>. Secrets are encrypted for the current Windows user.</li>
+            <li><strong>Windows:</strong> settings, config, data, and logs live under <code>%LOCALAPPDATA%\YardRelay</code>. Secrets are encrypted for the current Windows user. An unsafe imported app token is discarded while Orbit credentials are still imported; YardRelay retains an existing safe token, or generates a replacement when none exists. An unsafe saved token reopens setup without overwriting the encrypted secrets file; before saving, confirm no watering is active. Saving creates the replacement and may discard recovery state signed by the rejected token, so verify the physical sprinkler state after restart. A separate protected-mode browser must unlock again.</li>
             <li><strong>Legacy Windows data:</strong> the app uses an existing YardRelay folder unchanged. Only when that destination is absent, it makes a staged one-time copy of <code>%LOCALAPPDATA%\BHyveController</code>, retains the legacy source, and never merges or overwrites an existing destination. Later startups are a no-op. Only copied paths that exactly match the old default data and yard-run config locations are rewritten; custom paths stay unchanged.</li>
             <li><strong>macOS today:</strong> the wrapper reads the source checkout and its private <code>.env</code>. Native Keychain and Application Support parity is planned separately.</li>
           </ul>
@@ -518,8 +518,8 @@
           </p>
 
           <div class="callout info">
-            This guide is bundled with the installed app version. When the verified public release page is available,
-            use it to check for a newer app and manual; the app does not silently replace its own binaries.
+            This guide is bundled with the installed app version. Use the canonical project release page to check whether
+            a newer app and manual have been published; the page may contain no beta yet, and the app does not silently replace its own binaries.
           </div>
         </section>
       </main>

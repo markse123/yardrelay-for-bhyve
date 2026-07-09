@@ -134,6 +134,20 @@ test('local HTTP service proves its identity without disclosing APP_TOKEN', { ti
     'successful wrapper identity probes must not flood user-visible logs',
   );
 
+  const crossSiteIdentity = await getJson(
+    `http://127.0.0.1:${port}/api/identity?challenge=${encodeURIComponent(challenge)}`,
+    { 'Sec-Fetch-Site': 'cross-site' },
+  );
+  assert.equal(crossSiteIdentity.response.status, 403);
+  assert.match(crossSiteIdentity.data.error, /Cross-site browser requests are not allowed/);
+
+  const wrongOriginIdentity = await getJson(
+    `http://127.0.0.1:${port}/api/identity?challenge=${encodeURIComponent(challenge)}`,
+    { Origin: 'https://attacker.example' },
+  );
+  assert.equal(wrongOriginIdentity.response.status, 403);
+  assert.match(wrongOriginIdentity.data.error, /Untrusted request origin/);
+
   const invalidIdentity = await getJson(
     `http://127.0.0.1:${port}/api/identity?challenge=invalid`,
   );
@@ -260,6 +274,23 @@ test('default local mode allows loopback controls without disclosing APP_TOKEN',
   });
   assert.equal(wrongOriginHistory.status, 403);
   assert.match((await wrongOriginHistory.json()).error, /Untrusted request origin/);
+
+  const crossSiteEvents = await fetch(`http://127.0.0.1:${port}/api/events`, {
+    headers: { 'Sec-Fetch-Site': 'cross-site' },
+  });
+  assert.equal(crossSiteEvents.status, 403);
+  assert.match((await crossSiteEvents.json()).error, /Cross-site browser requests are not allowed/);
+
+  const wrongOriginEvents = await fetch(`http://127.0.0.1:${port}/api/events`, {
+    headers: { Origin: 'https://attacker.example' },
+  });
+  assert.equal(wrongOriginEvents.status, 403);
+  assert.match((await wrongOriginEvents.json()).error, /Untrusted request origin/);
+
+  const nativeEvents = await fetch(`http://127.0.0.1:${port}/api/events`);
+  assert.equal(nativeEvents.status, 200);
+  assert.match(nativeEvents.headers.get('content-type') || '', /^text\/event-stream/);
+  await nativeEvents.body.cancel();
 
   const localHistory = await fetch(`http://127.0.0.1:${port}/api/history?hours=1`, {
     headers: { Origin: `http://127.0.0.1:${port}` },
