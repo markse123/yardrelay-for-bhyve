@@ -18,5 +18,9 @@ let package = Package(
                 .linkedFramework("WebKit"),
             ]
         ),
+        .testTarget(
+            name: "BHyveControllerAppTests",
+            dependencies: ["BHyveControllerApp"]
+        ),
     ]
 )

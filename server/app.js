@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { chmod, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -26,6 +26,7 @@ import {
 } from './orbit-lifecycle.js';
 import {
   buildTrustedHosts,
+  buildTrustedOrigins,
   isLoopbackAddress,
   isPathInside,
   isTrustedOriginHeader,
@@ -38,14 +39,18 @@ import { resolveRuntimePaths } from './runtime-config.js';
 import { loadWateringRuns } from './yard-run-config.js';
 import { SseClientRegistry } from './sse-clients.js';
 import {
+  acknowledgeYardRunStateClaim,
+  claimYardRunState,
   clearYardRunState,
-  loadYardRunState,
+  createYardRunConfigDigest,
   reconcileYardRunStateDevices,
   saveYardRunState,
+  validateYardRunStateClaim,
 } from './yard-run-state.js';
 import {
   CONTROLLER_PROTOCOL_VERSION,
   CONTROLLER_SERVICE_NAME,
+  controllerOriginFromSocket,
   createControllerProof,
   isValidControllerChallenge,
   tokensMatch,
@@ -68,6 +73,7 @@ const PORT = Number(env.PORT || 3030);
 const APP_TOKEN = env.APP_TOKEN || crypto.randomBytes(24).toString('hex');
 const WRITE_ACCESS_MODE = parseWriteAccessMode(env.WRITE_ACCESS_MODE);
 const TRUSTED_HOSTS = buildTrustedHosts({ host: HOST, trustedHosts: env.TRUSTED_HOSTS });
+const TRUSTED_ORIGINS = buildTrustedOrigins({ trustedHosts: TRUSTED_HOSTS, port: PORT });
 const MAX_JSON_BODY_BYTES = parsePositiveInteger(env.MAX_JSON_BODY_BYTES, 1_048_576, {
   max: 10_485_760,
   name: 'MAX_JSON_BODY_BYTES',
@@ -93,6 +99,10 @@ const MAX_HISTORY_HOURS = 184;
 const HISTORY_PAGE_SIZE = 50;
 const MAX_HISTORY_PAGES = 10;
 const MAX_HISTORY_EVENTS = 200;
+const HISTORY_CACHE_TTL_MS = 30_000;
+const HISTORY_REQUEST_DEADLINE_MS = 45_000;
+const HISTORY_BUILD_COOLDOWN_MS = 5_000;
+const MAX_HISTORY_CACHE_ENTRIES = 4;
 const RAIN_DELAY_VERIFY_DELAYS_MS = [1000, 2000, 3500];
 const MAX_REQUEST_LOGS = 250;
 const MAX_STATUS_ERROR_LENGTH = 1200;
@@ -101,6 +111,7 @@ const SAFE_DIAGNOSTIC_QUERY_KEYS = new Set(['hours', 'page', 'per-page', 't']);
 const YARD_RUN_DEFAULT_MINUTES = 10;
 const YARD_RUN_STEP_GAP_MS = 2500;
 const WATERING_RUNS = loadWateringRuns(yardRunConfigPath);
+const YARD_RUN_CONFIG_DIGEST = createYardRunConfigDigest(WATERING_RUNS);
 const WATERING_RUN_BY_KEY = new Map(WATERING_RUNS.map((run) => [run.key, run]));
 
 const clients = new SseClientRegistry({
@@ -119,9 +130,13 @@ let refreshTimer = null;
 const runRefreshTask = createRefreshTaskRunner();
 let yardRunTimer = null;
 let yardRunPersistQueue = Promise.resolve();
+let historyInFlight = null;
+let historyNextBuildAt = 0;
+const historyCache = new Map();
 let shuttingDown = false;
 let yardRun = createIdleYardRun();
 let yardRunNeedsRecovery = false;
+let yardRunRecoveryClaim = null;
 let state = {
   status: {
     configured: Boolean(env.ORBIT_EMAIL && env.ORBIT_PASSWORD),
@@ -139,8 +154,11 @@ let state = {
   recentEvents,
 };
 
-await mkdir(dataDir, { recursive: true });
-await mkdir(snapshotDir, { recursive: true });
+await mkdir(dataDir, { recursive: true, mode: 0o700 });
+await mkdir(snapshotDir, { recursive: true, mode: 0o700 });
+if (process.platform !== 'win32') {
+  await chmod(snapshotDir, 0o700);
+}
 await restoreYardRunState();
 state.yardRun = describeYardRun();
 
@@ -233,12 +251,14 @@ async function route(req, res) {
     if (!isValidControllerChallenge(challenge)) {
       throw newHttpError(400, 'challenge must be a 32-byte base64url value');
     }
+    const origin = controllerOriginFromSocket(req.socket);
     rememberControllerChallenge(challenge);
     return sendJson(res, 200, {
       service: CONTROLLER_SERVICE_NAME,
       protocolVersion: CONTROLLER_PROTOCOL_VERSION,
+      origin,
       challenge,
-      proof: createControllerProof(APP_TOKEN, challenge, 'identity'),
+      proof: createControllerProof(APP_TOKEN, challenge, 'identity', origin),
     });
   }
 
@@ -251,8 +271,10 @@ async function route(req, res) {
   }
 
   if (url.pathname === '/api/history' && req.method === 'GET') {
+    requireTrustedBrowserRead(req);
+    requireHistoryAccess(req);
     const hours = clampInteger(url.searchParams.get('hours') || DEFAULT_HISTORY_HOURS, 1, MAX_HISTORY_HOURS, 'hours');
-    const history = await buildZoneHistory({ hours });
+    const history = await getZoneHistory({ hours });
     return sendJson(res, 200, history);
   }
 
@@ -427,6 +449,11 @@ function wireOrbit(client) {
     addEvent(streamState === 'running' ? 'info' : 'warn', `Orbit event stream ${streamState}`);
     broadcastState();
   });
+  client.on('authentication-state', (authenticated) => {
+    state.status.authenticated = Boolean(authenticated);
+    if (!authenticated) state.status.streamConnected = false;
+    broadcastState();
+  });
   client.on('log', (entry) => {
     addEvent(entry.level || 'info', entry.message || 'Orbit log', entry);
     broadcastState();
@@ -542,8 +569,7 @@ async function performRefreshState({ forceLogin = false } = {}) {
     orbit.closeStream();
     return currentState();
   }
-  state.status.authenticated = true;
-
+  state.status.authenticated = orbit.authenticated;
   const [devices, programs] = await Promise.all([orbit.devices(), orbit.programs()]);
   if (shuttingDown) {
     orbit.closeStream();
@@ -565,7 +591,7 @@ async function performRefreshState({ forceLogin = false } = {}) {
     programs: Array.isArray(programs) ? programs : [],
     recentEvents,
   };
-  resumeRecoveredYardRun();
+  await resumeRecoveredYardRun();
   state.yardRun = describeYardRun();
   broadcastState();
   refreshTimer = ensureScheduledRefresh(refreshTimer, () => setInterval(() => {
@@ -752,8 +778,12 @@ function clearYardStepWateringStatus(step) {
 
 async function restoreYardRunState() {
   try {
-    const restored = await loadYardRunState(yardRunStatePath, { integritySecret: APP_TOKEN });
-    if (!restored) return;
+    const recoveryClaim = await claimYardRunState(yardRunStatePath, {
+      integritySecret: APP_TOKEN,
+      expectedConfigDigest: YARD_RUN_CONFIG_DIGEST,
+    });
+    if (!recoveryClaim) return;
+    const restored = recoveryClaim.yardRun;
     const activeRun = createActiveYardRun();
     yardRun = {
       ...activeRun,
@@ -761,6 +791,7 @@ async function restoreYardRunState() {
       id: restored.id || activeRun.id,
       status: 'running',
     };
+    yardRunRecoveryClaim = recoveryClaim;
     yardRunNeedsRecovery = true;
     addEvent('info', 'Recovered yard run queue from local state');
   } catch (error) {
@@ -768,9 +799,24 @@ async function restoreYardRunState() {
   }
 }
 
-function resumeRecoveredYardRun() {
+async function resumeRecoveredYardRun() {
   if (!yardRunNeedsRecovery || yardRun.status !== 'running') {
     return;
+  }
+
+  if (yardRunRecoveryClaim) {
+    try {
+      await validateYardRunStateClaim(yardRunStatePath, yardRunRecoveryClaim, {
+        integritySecret: APP_TOKEN,
+        expectedConfigDigest: YARD_RUN_CONFIG_DIGEST,
+      });
+    } catch (error) {
+      yardRunRecoveryClaim = null;
+      yardRunNeedsRecovery = false;
+      yardRun = createIdleYardRun('Saved yard run recovery expired or became invalid');
+      addEvent('warn', `Ignored saved yard run state: ${error.message}`);
+      return;
+    }
   }
 
   clearTimeout(yardRunTimer);
@@ -780,9 +826,9 @@ function resumeRecoveredYardRun() {
     addEvent('warn', `Ignored ${reconciled.droppedSteps.length} saved yard run zone${reconciled.droppedSteps.length === 1 ? '' : 's'} that no longer match current Orbit devices`);
   }
   if (!reconciled.yardRun) {
-    yardRunNeedsRecovery = false;
     yardRun = createIdleYardRun('Recovered yard run had no current valid zones');
-    persistYardRunState();
+    await persistYardRunState({ acknowledgeRecovery: true });
+    yardRunNeedsRecovery = false;
     return;
   }
   yardRun = {
@@ -798,17 +844,17 @@ function resumeRecoveredYardRun() {
     const remainingMs = remainingYardStepMs(currentStep);
     yardRun.updatedAt = new Date().toISOString();
     if (remainingMs > 0) {
-      yardRunNeedsRecovery = false;
       yardRun.message = `Recovered yard run; ${currentStep.zoneName} is still running`;
-      persistYardRunState();
+      await persistYardRunState({ acknowledgeRecovery: true });
+      yardRunNeedsRecovery = false;
       yardRunTimer = setTimeout(completeCurrentYardStep, remainingMs);
       addEvent('info', yardRun.message);
       return;
     }
 
-    yardRunNeedsRecovery = false;
     yardRun.message = `Recovered yard run; finishing overdue ${currentStep.zoneName}`;
-    persistYardRunState();
+    await persistYardRunState({ acknowledgeRecovery: true });
+    yardRunNeedsRecovery = false;
     yardRunTimer = setTimeout(completeCurrentYardStep, 1);
     addEvent('warn', yardRun.message);
     return;
@@ -827,7 +873,7 @@ function resumeRecoveredYardRun() {
     const shouldLog = yardRun.message !== message;
     yardRun.message = message;
     yardRun.updatedAt = new Date().toISOString();
-    persistYardRunState();
+    await persistYardRunState({ acknowledgeRecovery: true });
     if (shouldLog) {
       addEvent('warn', yardRun.message);
     }
@@ -835,16 +881,16 @@ function resumeRecoveredYardRun() {
   }
 
   if (yardRun.queuedSteps.length === 0) {
-    yardRunNeedsRecovery = false;
     yardRun = createIdleYardRun('Recovered yard run had no remaining zones');
-    persistYardRunState();
+    await persistYardRunState({ acknowledgeRecovery: true });
+    yardRunNeedsRecovery = false;
     return;
   }
 
-  yardRunNeedsRecovery = false;
   yardRun.message = 'Recovered yard run queue';
   yardRun.updatedAt = new Date().toISOString();
-  persistYardRunState();
+  await persistYardRunState({ acknowledgeRecovery: true });
+  yardRunNeedsRecovery = false;
   yardRunTimer = setTimeout(startNextYardStep, YARD_RUN_STEP_GAP_MS);
   addEvent('info', yardRun.message);
 }
@@ -863,17 +909,35 @@ function remainingYardStepMs(step) {
   return step.minutes * 60 * 1000;
 }
 
-function persistYardRunState() {
+function persistYardRunState({ acknowledgeRecovery = false } = {}) {
   const snapshot = yardRun.status === 'running' ? cloneYardRunForPersistence(yardRun) : null;
-  yardRunPersistQueue = yardRunPersistQueue
+  const recoveryClaim = acknowledgeRecovery ? yardRunRecoveryClaim : null;
+  const operation = yardRunPersistQueue
     .catch(() => {})
-    .then(() => (snapshot
-      ? saveYardRunState(yardRunStatePath, snapshot, { integritySecret: APP_TOKEN })
-      : clearYardRunState(yardRunStatePath)))
+    .then(async () => {
+      if (recoveryClaim) {
+        await acknowledgeYardRunStateClaim(yardRunStatePath, recoveryClaim, snapshot, {
+          integritySecret: APP_TOKEN,
+          configDigest: YARD_RUN_CONFIG_DIGEST,
+        });
+        if (yardRunRecoveryClaim === recoveryClaim) yardRunRecoveryClaim = null;
+        return;
+      }
+      if (snapshot) {
+        await saveYardRunState(yardRunStatePath, snapshot, {
+          integritySecret: APP_TOKEN,
+          configDigest: YARD_RUN_CONFIG_DIGEST,
+        });
+      } else {
+        await clearYardRunState(yardRunStatePath);
+      }
+    });
+  yardRunPersistQueue = operation
     .catch((error) => {
       console.error('Failed to persist yard run state:', error);
       addEvent('warn', 'Failed to persist yard run state');
     });
+  return operation;
 }
 
 function cloneYardRunForPersistence(value) {
@@ -1093,12 +1157,53 @@ function wateringStatuses(device) {
   return statuses;
 }
 
-async function buildZoneHistory({ hours }) {
+async function getZoneHistory({ hours }) {
+  const cached = historyCache.get(hours);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+  historyCache.delete(hours);
+
+  if (historyInFlight) {
+    if (historyInFlight.hours === hours) return historyInFlight.promise;
+    throw newHttpError(429, 'Another history request is already running');
+  }
+  if (Date.now() < historyNextBuildAt) {
+    throw newHttpError(429, 'History was refreshed recently; try again in a few seconds');
+  }
+
+  const abortController = new AbortController();
+  const deadline = setTimeout(() => {
+    abortController.abort(newHttpError(504, 'History request exceeded its 45 second deadline'));
+  }, HISTORY_REQUEST_DEADLINE_MS);
+  const promise = buildZoneHistory({ hours, signal: abortController.signal })
+    .then((value) => {
+      historyCache.set(hours, {
+        expiresAt: Date.now() + HISTORY_CACHE_TTL_MS,
+        value,
+      });
+      while (historyCache.size > MAX_HISTORY_CACHE_ENTRIES) {
+        historyCache.delete(historyCache.keys().next().value);
+      }
+      return value;
+    })
+    .finally(() => {
+      clearTimeout(deadline);
+      historyNextBuildAt = Date.now() + HISTORY_BUILD_COOLDOWN_MS;
+      if (historyInFlight?.promise === promise) historyInFlight = null;
+    });
+  historyInFlight = { hours, promise };
+  return promise;
+}
+
+async function buildZoneHistory({ hours, signal }) {
   ensureOrbitConfigured();
   await ensureOrbitConnection(orbit);
-  state.status.authenticated = true;
+  signal?.throwIfAborted();
+  state.status.authenticated = orbit.authenticated;
   if ((state.devices || []).length === 0) {
     await refreshState();
+    signal?.throwIfAborted();
   }
 
   const until = new Date();
@@ -1109,8 +1214,10 @@ async function buildZoneHistory({ hours }) {
       return await fetchDeviceHistory(device, {
         sinceMs: since.getTime(),
         untilMs: until.getTime(),
+        signal,
       });
     } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
       return {
         events: [],
         truncated: false,
@@ -1149,15 +1256,17 @@ async function buildZoneHistory({ hours }) {
   };
 }
 
-async function fetchDeviceHistory(device, { sinceMs, untilMs }) {
+async function fetchDeviceHistory(device, { sinceMs, untilMs, signal }) {
   const deviceId = getDeviceId(device);
   const historyItems = [];
   let truncated = false;
 
   for (let page = 1; page <= MAX_HISTORY_PAGES; page += 1) {
+    signal?.throwIfAborted();
     const pageItems = await orbit.wateringEvents(deviceId, {
       page,
       perPage: HISTORY_PAGE_SIZE,
+      signal,
     });
     const items = Array.isArray(pageItems) ? pageItems : [];
     historyItems.push(...items);
@@ -1507,10 +1616,10 @@ function isSupportedFrequency(frequency) {
 async function saveSnapshot(action, id, payload) {
   const safeId = String(id).replace(/[^a-zA-Z0-9_.-]/g, '_');
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filePath = path.join(snapshotDir, `${stamp}-${action}-${safeId}.json`);
+  const filePath = path.join(snapshotDir, `${stamp}-${action}-${safeId}-${crypto.randomUUID()}.json`);
   await writeFile(
     filePath,
-    JSON.stringify(
+    `${JSON.stringify(
       {
         action,
         id,
@@ -1519,7 +1628,8 @@ async function saveSnapshot(action, id, payload) {
       },
       null,
       2,
-    ),
+    )}\n`,
+    { mode: 0o600, flag: 'wx' },
   );
 }
 
@@ -1551,7 +1661,7 @@ function newHttpError(statusCode, message) {
 }
 
 function requireWriteAccess(req) {
-  if (!isTrustedOriginHeader(req.headers.origin, TRUSTED_HOSTS)) {
+  if (!isTrustedOriginHeader(req.headers.origin, TRUSTED_ORIGINS)) {
     throw newHttpError(403, 'Untrusted request origin');
   }
   if (isWriteTokenRequired(req) && !hasValidToken(req)) {
@@ -1561,15 +1671,34 @@ function requireWriteAccess(req) {
   }
 }
 
+function requireTrustedBrowserRead(req) {
+  if (String(req.headers['sec-fetch-site'] || '').toLowerCase() === 'cross-site') {
+    throw newHttpError(403, 'Cross-site browser requests are not allowed');
+  }
+  if (!isTrustedOriginHeader(req.headers.origin, TRUSTED_ORIGINS)) {
+    throw newHttpError(403, 'Untrusted request origin');
+  }
+}
+
+function requireHistoryAccess(req) {
+  if (!isLoopbackAddress(req.socket.remoteAddress) && !hasValidToken(req)) {
+    throw newHttpError(403, 'Missing or invalid X-App-Token');
+  }
+}
+
 function requireShutdownAuthorization(req) {
-  if (!isTrustedOriginHeader(req.headers.origin, TRUSTED_HOSTS)) {
+  if (!isTrustedOriginHeader(req.headers.origin, TRUSTED_ORIGINS)) {
     throw newHttpError(403, 'Untrusted request origin');
   }
   if (hasValidToken(req)) return;
+  if (!isLocalRequest(req)) {
+    throw newHttpError(403, 'Missing or invalid controller authorization');
+  }
 
   const challenge = req.headers['x-controller-challenge'];
   const proof = req.headers['x-controller-proof'];
-  if (!verifyControllerProof(APP_TOKEN, challenge, 'shutdown', proof)
+  const origin = controllerOriginFromSocket(req.socket);
+  if (!verifyControllerProof(APP_TOKEN, challenge, 'shutdown', origin, proof)
       || !consumeControllerChallenge(challenge)) {
     throw newHttpError(403, 'Missing or invalid controller authorization');
   }
@@ -1636,6 +1765,7 @@ function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
+    ...browserSecurityHeaders(),
   });
   res.end(JSON.stringify(payload));
 }
@@ -1662,6 +1792,7 @@ async function serveStatic(requestPath, res) {
   res.writeHead(200, {
     'Content-Type': contentType(filePath),
     'Cache-Control': 'no-store',
+    ...browserSecurityHeaders(),
   });
   res.end(content);
 }
@@ -1675,6 +1806,7 @@ function openSse(req, res) {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-store',
     Connection: 'keep-alive',
+    ...browserSecurityHeaders(),
   });
   const client = clients.add(req, res);
   if (!client) {
@@ -1683,6 +1815,16 @@ function openSse(req, res) {
   }
   if (!clients.write(client, `event: state\ndata: ${JSON.stringify(currentState())}\n\n`)) return;
   clients.write(client, `event: request-logs\ndata: ${JSON.stringify({ logs: recentLogs })}\n\n`);
+}
+
+function browserSecurityHeaders() {
+  return {
+    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
+    'Permissions-Policy': 'camera=(), geolocation=(), microphone=()',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+  };
 }
 
 function currentState() {
@@ -1786,6 +1928,7 @@ function summarizeLocalResponse(pathname, payload) {
     return {
       service: payload.service,
       protocolVersion: payload.protocolVersion,
+      origin: payload.origin,
       challenge: '[redacted]',
       proof: '[redacted]',
       error: payload.error ? sanitizeDiagnosticText(payload.error, { maxLength: 500 }) : undefined,

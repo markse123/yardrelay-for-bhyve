@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../windows/BHyveControllerApp/Models/DesktopSettings.cs" Link="Production/DesktopSettings.cs" />
+    <Compile Include="../../windows/BHyveControllerApp/Services/DesktopPaths.cs" Link="Production/DesktopPaths.cs" />
+    <Compile Include="../../windows/BHyveControllerApp/Services/SettingsStore.cs" Link="Production/SettingsStore.cs" />
+  </ItemGroup>
+</Project>

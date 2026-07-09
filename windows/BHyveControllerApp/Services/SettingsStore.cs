@@ -60,7 +60,7 @@ public sealed class SettingsStore
     private void Normalize(DesktopSettings settings)
     {
         settings.Version = settings.Version <= 0 ? 1 : settings.Version;
-        settings.Host = settings.Host is "localhost" ? "localhost" : "127.0.0.1";
+        settings.Host = "127.0.0.1";
         settings.DataDir = string.IsNullOrWhiteSpace(settings.DataDir) ? _paths.DataDir : settings.DataDir;
         settings.YardRunConfigPath = string.IsNullOrWhiteSpace(settings.YardRunConfigPath)
             ? _paths.YardRunConfigPath

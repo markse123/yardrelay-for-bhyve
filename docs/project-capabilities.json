@@ -186,7 +186,7 @@
     },
     {
       "id": "windows-package",
-      "label": "Create the self-contained Windows package",
+      "label": "Create the Windows package with a bundled .NET runtime",
       "command": "./windows/package-windows.ps1 -Runtime win-x64",
       "language": "powershell",
       "evidence": [
