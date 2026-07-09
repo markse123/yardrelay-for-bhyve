@@ -26,12 +26,12 @@
 
   <ItemGroup>
     <!-- Keep runtime source packaging explicit so ignored or untracked local files cannot enter a release. -->
-    <Content Include="..\..\server\app.js;..\..\server\orbit-client.js;..\..\server\orbit-lifecycle.js;..\..\server\runtime-config.js;..\..\server\security.js;..\..\server\service-identity.js;..\..\server\sse-clients.js;..\..\server\yard-run-config.js;..\..\server\yard-run-state.js">
+    <Content Include="..\..\server\app.js;..\..\server\bounded-map.js;..\..\server\orbit-client.js;..\..\server\orbit-lifecycle.js;..\..\server\runtime-config.js;..\..\server\safe-json.js;..\..\server\security.js;..\..\server\service-identity.js;..\..\server\sse-clients.js;..\..\server\sse-frame.js;..\..\server\yard-run-config.js;..\..\server\yard-run-runtime.js;..\..\server\yard-run-state.js">
       <Link>server\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
-    <Content Include="..\..\public\app.js;..\..\public\diagnostics.js;..\..\public\index.html;..\..\public\styles.css">
+    <Content Include="..\..\public\app-token-policy.js;..\..\public\app.js;..\..\public\diagnostics.js;..\..\public\index.html;..\..\public\styles.css">
       <Link>public\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>

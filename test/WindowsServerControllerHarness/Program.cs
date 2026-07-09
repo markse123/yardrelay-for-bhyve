@@ -14,9 +14,11 @@ Directory.CreateDirectory(artifactRoot);
 
 try
 {
+    VerifyAppTokenPolicy();
     VerifyServiceIdentityFixedVectors();
     VerifyWriteAccessSettings();
     VerifyHelpExternalLinkAllowlist();
+    await VerifyUnsafeTokenCannotReachRuntimeAsync();
     await VerifyUntrustedListenerIsRejectedAsync();
     await VerifyCrossPortIdentityProofIsRejectedAsync();
     await VerifyAuthenticatedControllerStillWorksAsync();
@@ -29,6 +31,91 @@ try
 finally
 {
     Directory.Delete(artifactRoot, recursive: true);
+}
+
+void VerifyAppTokenPolicy()
+{
+    var strongToken = $"synthetic-test-{new string('A', 24)}-9z";
+    if (!AppTokenPolicy.TryNormalize(strongToken, out var acceptedToken)
+        || !string.Equals(acceptedToken, strongToken, StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException("The Windows app-token policy rejected a strong synthetic token.");
+    }
+
+    var minimumLengthToken = string.Concat("Ab1!", new string('x', AppTokenPolicy.MinimumLength - 4));
+    if (!AppTokenPolicy.TryNormalize(minimumLengthToken, out _))
+    {
+        throw new InvalidOperationException("The Windows app-token policy rejected its documented minimum length.");
+    }
+
+    var rejectedTokens = new[]
+    {
+        "replace-with-a-long-random-local-token",
+        "REPLACE-WITH-A-LONG-RANDOM-LOCAL-TOKEN",
+        "replace-with-a-long-random-local-token-but-not-really",
+        "x",
+        $"synthetic-token-{(char)1}-control",
+        $"synthetic-token-{(char)127}-control",
+        $"synthetic-token-{(char)233}-non-ascii",
+        "password123456789012345678901234",
+        "placeholder-12345678901234567890",
+        "redacted-12345678901234567890123",
+        $" {strongToken}",
+        $"{strongToken} ",
+        string.Concat("Ab1!", new string('x', AppTokenPolicy.MinimumLength - 5)),
+        string.Concat("Ab1!", new string('x', AppTokenPolicy.MaximumLength - 3)),
+    };
+    if (rejectedTokens.Any(token => AppTokenPolicy.TryNormalize(token, out _)))
+    {
+        throw new InvalidOperationException("The Windows app-token policy accepted an unsafe token.");
+    }
+
+    var maximumLengthToken = string.Concat("Ab1!", new string('x', AppTokenPolicy.MaximumLength - 4));
+    if (!AppTokenPolicy.TryNormalize(maximumLengthToken, out _))
+    {
+        throw new InvalidOperationException("The Windows app-token policy rejected its documented maximum length.");
+    }
+
+    var replacement = AppTokenPolicy.NormalizeOrGenerate(
+        "replace-with-a-long-random-local-token",
+        out var generated);
+    if (!generated
+        || replacement.Length != 64
+        || !replacement.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f')
+        || !AppTokenPolicy.TryNormalize(replacement, out _))
+    {
+        throw new InvalidOperationException("The Windows app-token fallback did not generate a safe 32-byte token.");
+    }
+
+    var preserved = AppTokenPolicy.NormalizeOrGenerate(strongToken, out generated);
+    if (generated || !string.Equals(preserved, strongToken, StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException("The Windows app-token policy changed an accepted token.");
+    }
+
+    if (AppTokenPolicy.TryNormalize(null, out _)
+        || AppTokenPolicy.TryNormalize(string.Empty, out _))
+    {
+        throw new InvalidOperationException("The Windows app-token policy accepted an absent token.");
+    }
+}
+
+async Task VerifyUnsafeTokenCannotReachRuntimeAsync()
+{
+    var settings = Settings(3030);
+    var secrets = Secrets();
+    secrets.AppToken = "replace-with-a-long-random-local-token";
+    using var controller = CreateController(settings.Port);
+
+    var probe = await controller.ProbeAsync(settings, secrets);
+    if (probe.Status != ControllerProbeStatus.Untrusted)
+    {
+        throw new InvalidOperationException("An unsafe app token reached the controller identity probe.");
+    }
+
+    await AssertThrowsAsync<InvalidOperationException>(
+        () => controller.StartAsync("/must/not/run", settings, secrets),
+        "app token is unsafe");
 }
 
 void VerifyServiceIdentityFixedVectors()

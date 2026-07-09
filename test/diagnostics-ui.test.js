@@ -515,6 +515,59 @@ test('dashboard behavior remains compatible with its strict style CSP', async ()
   assert.match(script, /<progress class="active-zone-progress"[^>]+value=/);
   assert.match(script, /<progress class="yard-run-progress"[^>]+value=/);
   assert.match(script, /textarea\.className = 'clipboard-copy-fallback'/);
-  assert.match(script, /async function apiGet\(path\)[\s\S]*headers: readHeaders\(\)/);
+  assert.match(script, /async function apiGet\(path\)[\s\S]*cache: 'no-store'/);
   assert.match(styles, /\.clipboard-copy-fallback\s*\{/);
+});
+
+test('dashboard sends APP_TOKEN only for config, exact history reads, and write methods', async () => {
+  const script = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  const apiGet = script.match(/async function apiGet\(path\) \{[\s\S]*?(?=\nasync function loadConfig)/)?.[0];
+  const loadConfig = script.match(/async function loadConfig\(\) \{[\s\S]*?(?=\n\/\/ History supports)/)?.[0];
+  const authenticatedReadHeaders = script.match(/function authenticatedReadHeaders\(path\) \{[\s\S]*?(?=\n\/\/ The config capability)/)?.[0];
+  const apiPost = script.match(/async function apiPost\(path, body\) \{[\s\S]*?(?=\nasync function apiPut)/)?.[0];
+  const apiPut = script.match(/async function apiPut\(path, body\) \{[\s\S]*?(?=\nfunction writeHeaders)/)?.[0];
+
+  assert.ok(apiGet);
+  assert.match(apiGet, /fetch\(path, \{[\s\S]*headers: authenticatedReadHeaders\(path\)/);
+
+  assert.ok(authenticatedReadHeaders);
+  assert.match(authenticatedReadHeaders, /new URL\(path, window\.location\.href\)/);
+  assert.match(authenticatedReadHeaders, /requestUrl\.origin === window\.location\.origin/);
+  assert.match(authenticatedReadHeaders, /requestUrl\.pathname === '\/api\/history'/);
+  assert.doesNotMatch(authenticatedReadHeaders, /startsWith|includes|indexOf|\.match\(/);
+
+  const location = new URL('http://127.0.0.1:3030/dashboard');
+  const authenticatesRead = (requestPath) => {
+    try {
+      const requestUrl = new URL(requestPath, location.href);
+      return requestUrl.origin === location.origin && requestUrl.pathname === '/api/history';
+    } catch {
+      return false;
+    }
+  };
+  assert.equal(authenticatesRead('/api/history'), true);
+  assert.equal(authenticatesRead('/api/history?hours=24'), true);
+  assert.equal(authenticatesRead('/api/other/../history?hours=24'), true);
+  assert.equal(authenticatesRead('/api/state'), false);
+  assert.equal(authenticatesRead('/api/logs'), false);
+  assert.equal(authenticatesRead('/api/history/export'), false);
+  assert.equal(authenticatesRead('/api/history-extra'), false);
+  assert.equal(authenticatesRead('/api/%68istory'), false);
+  assert.equal(authenticatesRead('/api/history%2Fexport'), false);
+  assert.equal(authenticatesRead('/api/history/../logs'), false);
+  assert.equal(authenticatesRead('https://example.invalid/api/history'), false);
+  assert.equal(authenticatesRead('http://['), false);
+  assert.match(script, /function loadState\(\)[\s\S]*apiGet\('\/api\/state'\)/);
+  assert.match(script, /function loadLogs\(\)[\s\S]*apiGet\('\/api\/logs'\)/);
+  assert.match(script, /function loadHistory\(\)[\s\S]*apiGet\(`\/api\/history\?hours=/);
+
+  assert.ok(loadConfig);
+  assert.match(loadConfig, /fetch\('\/api\/config', \{[\s\S]*headers: configReadHeaders\(\)/);
+  assert.equal([...script.matchAll(/\bconfigReadHeaders\(\)/g)].length, 3);
+
+  assert.ok(apiPost);
+  assert.match(apiPost, /method: 'POST',[\s\S]*headers: writeHeaders\(\)/);
+  assert.ok(apiPut);
+  assert.match(apiPut, /method: 'PUT',[\s\S]*headers: writeHeaders\(\)/);
+  assert.match(script, /function writeHeaders\(\)[\s\S]*headers\['X-App-Token'\] = state\.appToken/);
 });

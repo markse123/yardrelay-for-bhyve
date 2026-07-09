@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "releaseLinksEnabled": false,
+  "releaseLinksEnabled": true,
   "accountRequirement": "Orbit B-hyve account credentials.",
   "capabilities": [
     {
@@ -117,7 +117,7 @@
     },
     {
       "id": "test",
-      "label": "Regenerate project documentation and run all checks",
+      "label": "Regenerate product metadata and project documentation, then run all checks",
       "command": "npm test",
       "language": "bash",
       "npmScript": "test",
@@ -125,7 +125,7 @@
     },
     {
       "id": "docs-update",
-      "label": "Regenerate the README and shared Help capability summary without running tests",
+      "label": "Regenerate the README and shared Help generated sections without running tests",
       "command": "npm run docs:update",
       "language": "bash",
       "npmScript": "docs:update",

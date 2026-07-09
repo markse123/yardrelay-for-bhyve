@@ -32,15 +32,18 @@ test('primary public surfaces state the exact B-hyve compatibility boundary', as
   assert.match(dashboard, new RegExp(subtitle));
 });
 
-test('release links stay gated until the private destination repository exists', async () => {
+test('bundled help links only to the canonical release page without adding automatic updates', async () => {
   const [manifestSource, help, macSource, windowsSource] = await Promise.all([
     readFile(new URL('../docs/project-capabilities.json', import.meta.url), 'utf8'),
     readFile(new URL('../public/help/index.html', import.meta.url), 'utf8'),
     readFile(new URL('../mac/BHyveControllerApp/Sources/BHyveControllerApp/BHyveControllerApp.swift', import.meta.url), 'utf8'),
     readFile(new URL('../windows/BHyveControllerApp/MainWindow.xaml', import.meta.url), 'utf8'),
   ]);
-  assert.equal(JSON.parse(manifestSource).releaseLinksEnabled, false);
-  assert.doesNotMatch(help, /yardrelay-for-bhyve\/releases/);
+  assert.equal(JSON.parse(manifestSource).releaseLinksEnabled, true);
+  assert.match(
+    help,
+    /href="https:\/\/github\.com\/markse123\/yardrelay-for-bhyve\/releases" target="_blank" rel="noopener noreferrer">Check project releases<\/a>/,
+  );
   assert.doesNotMatch(macSource, /Check for Updates|openReleasesPage|releasesURL/);
   assert.doesNotMatch(windowsSource, /Check for updates|UpdatesButton_Click/);
 });

@@ -1,15 +1,15 @@
 # Public Release Plan
 
-This document records release intent; it does not authorize publication or a repository visibility change.
+This document records the enduring release boundary and controls. It does not itself publish a release or change repository visibility.
 
 ## Repository boundary
 
 - Keep the earlier development repository private permanently because its old history contains research material that is outside the public source boundary.
 - Treat the canonical [`markse123/yardrelay-for-bhyve`](https://github.com/markse123/yardrelay-for-bhyve) repository, rooted at clean-history commit `b864287de7ac398042e20b5cfecc754d195a1f58` and prepared from/audited against private revision `1f5136a5e70cf9c081b0fdbc1c535675212844a1`, as the only public-source and release repository. The two trees are not byte-identical.
-- Keep this repository **private** until the owner explicitly approves making it public after the remaining gates below pass.
-- Keep in-app release links disabled while this repository is private and until the public release destination has been verified.
+- Treat every commit in the canonical repository as public-ready regardless of its current GitHub visibility. Visibility changes remain explicit owner actions outside the source tree.
+- Link only to the canonical repository's GitHub release page. It may be unavailable before the visibility change or contain no releases before the first beta; the app must not silently poll or install updates.
 - Do not copy branches, tags, issues, releases, commits, or other Git objects from the earlier development repository.
-- Before changing visibility, inspect every author and committer name and email in the history that will become public. Explicitly approve intended identities, and rewrite unintended employer or personal email disclosure in this clean repository before publication.
+- Review author and committer names and email addresses as commits are added. Repeat the complete identity and history review after any exceptional rewrite or import.
 
 ## First beta target
 
@@ -32,6 +32,6 @@ This document records release intent; it does not authorize publication or a rep
 - Preserve user data by default during uninstall. Manual local backup and restore require the app to be stopped, a complete copy of `%LOCALAPPDATA%\YardRelay`, and replacement rather than merging of an existing destination. Only `secrets.bin` is DPAPI-protected; other files may contain sensitive property or device data in plaintext and backups should be encrypted at rest. DPAPI secrets remain bound to the originating Windows user/profile, so restores elsewhere require credentials to be entered again. Destructive reset must remain an explicit operation.
 - The Windows wrapper implements the migration behavior in [`docs/desktop-setup.md`](desktop-setup.md): it prefers an existing `%LOCALAPPDATA%\YardRelay` destination; otherwise it makes a staged one-time copy of `%LOCALAPPDATA%\BHyveController`, retains the legacy source, never overwrites or merges a destination, rewrites only copied exact-default data/config paths, preserves custom paths, and makes later startups idempotent.
 
-## Public-readiness gate
+## Ongoing publication gate
 
-Creating the fresh-history repository completed the repository-boundary step only; it did not complete the public release. Before changing repository visibility, complete and review the safety/data phase, usability phase, Windows runtime packaging, migration validation, manual backup/restore validation including DPAPI portability limits, security scan, license/provenance audit, privacy scan, clean-export inventory, and release-candidate tests. Verify private vulnerability reporting and re-run the checklist in [`SECURITY.md`](../SECURITY.md) immediately before publication.
+The fresh-history repository is the publication boundary; merging source does not publish a packaged release. Before a human publishes each draft beta, review safety and data handling, usability, Windows runtime packaging, migration behavior, manual backup and restore including DPAPI portability limits, security results, license/provenance, privacy scanning, the clean artifact inventory, and release-candidate tests. Verify the external private-vulnerability-reporting route and re-run the checklist in [`SECURITY.md`](../SECURITY.md). Repository visibility and GitHub security settings remain separately controlled by the owner.
