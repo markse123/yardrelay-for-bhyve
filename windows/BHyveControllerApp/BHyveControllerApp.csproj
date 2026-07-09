@@ -2,6 +2,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.22000.0</TargetFramework>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <UseWPF>true</UseWPF>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
@@ -10,21 +11,33 @@
     <RootNamespace>BHyveControllerApp</RootNamespace>
     <Version>0.2.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <WarningsAsErrors Condition="'$(YardRelayFailOnNuGetAudit)' == 'true'">$(WarningsAsErrors);NU1900;NU1901;NU1902;NU1903;NU1904</WarningsAsErrors>
+    <DebugType Condition="'$(Configuration)' == 'Release'">None</DebugType>
+    <DebugSymbols Condition="'$(Configuration)' == 'Release'">false</DebugSymbols>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4022.49" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4022.49" GeneratePathProperty="true" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" GeneratePathProperty="true" />
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="..\..\server\**\*">
-      <Link>server\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    <!-- Keep runtime source packaging explicit so ignored or untracked local files cannot enter a release. -->
+    <Content Include="..\..\server\app.js;..\..\server\orbit-client.js;..\..\server\orbit-lifecycle.js;..\..\server\runtime-config.js;..\..\server\security.js;..\..\server\service-identity.js;..\..\server\sse-clients.js;..\..\server\yard-run-config.js;..\..\server\yard-run-state.js">
+      <Link>server\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
-    <Content Include="..\..\public\**\*">
-      <Link>public\%(RecursiveDir)%(Filename)%(Extension)</Link>
+    <Content Include="..\..\public\app.js;..\..\public\diagnostics.js;..\..\public\index.html;..\..\public\styles.css">
+      <Link>public\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\..\public\help\index.html;..\..\public\help\manual.css;..\..\public\help\manual.js">
+      <Link>public\help\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
@@ -70,6 +83,21 @@
     </Content>
     <Content Include="..\..\LICENSE">
       <Link>LICENSE</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="$(PkgMicrosoft_Web_WebView2)\LICENSE.txt">
+      <Link>licenses\Microsoft.Web.WebView2\LICENSE.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="$(PkgMicrosoft_Web_WebView2)\NOTICE.txt">
+      <Link>licenses\Microsoft.Web.WebView2\NOTICE.txt</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="$(PkgSystem_Security_Cryptography_ProtectedData)\THIRD-PARTY-NOTICES.TXT">
+      <Link>licenses\System.Security.Cryptography.ProtectedData\THIRD-PARTY-NOTICES.txt</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>

@@ -1018,9 +1018,7 @@ function activeZoneRow(activeZone) {
         <span>remaining</span>
       </div>
       <button class="danger" data-action="stop-zone" data-device-id="${escapeAttr(activeZone.deviceId)}" data-device-name="${escapeAttr(activeZone.deviceName)}" data-station="${escapeAttr(activeZone.station)}" ${activeZone.deviceId ? '' : 'disabled title="Missing Orbit device id"'}>Stop</button>
-      <div class="active-zone-progress" aria-hidden="true">
-        <span style="width: ${escapeAttr(progress.toFixed(0))}%"></span>
-      </div>
+      <progress class="active-zone-progress" max="100" value="${escapeAttr(progress.toFixed(0))}" aria-label="Watering time remaining"></progress>
     </article>
   `;
 }
@@ -1621,9 +1619,7 @@ function yardRunProgress(yardRun) {
             <strong>${escapeHtml(formatRemainingTime(remainingMs))}</strong>
             <span>remaining</span>
           </div>
-          <div class="yard-run-progress" aria-hidden="true">
-            <span style="width: ${escapeAttr(progress.toFixed(0))}%"></span>
-          </div>
+          <progress class="yard-run-progress" max="100" value="${escapeAttr(progress.toFixed(0))}" aria-label="Current yard-run step progress"></progress>
         </div>
       ` : '<p class="muted">Preparing next zone.</p>'}
       <div class="yard-run-sequence">
@@ -2276,19 +2272,23 @@ function requireFirstActionData(label, values) {
 }
 
 async function apiGet(path) {
-  const response = await fetch(path, { cache: 'no-store' });
+  const response = await fetch(path, {
+    cache: 'no-store',
+    headers: readHeaders(),
+  });
   return parseResponse(response);
 }
 
 async function loadConfig() {
-  const headers = state.appToken
-    ? { 'X-App-Token': state.appToken }
-    : {};
   const response = await fetch('/api/config', {
     cache: 'no-store',
-    headers,
+    headers: readHeaders(),
   });
   return parseResponse(response);
+}
+
+function readHeaders() {
+  return state.appToken ? { 'X-App-Token': state.appToken } : {};
 }
 
 async function apiPost(path, body) {
@@ -2433,9 +2433,7 @@ function fallbackCopyText(text) {
     textarea.value = text;
     textarea.readOnly = true;
     textarea.setAttribute('aria-hidden', 'true');
-    textarea.style.position = 'fixed';
-    textarea.style.opacity = '0';
-    textarea.style.pointerEvents = 'none';
+    textarea.className = 'clipboard-copy-fallback';
     copyContainer.append(textarea);
     textarea.select();
     copied = document.execCommand('copy');

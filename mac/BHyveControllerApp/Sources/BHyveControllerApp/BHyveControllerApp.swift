@@ -569,6 +569,7 @@ final class ServerController: ObservableObject {
                 self?.outputPipe?.fileHandleForReading.readabilityHandler = nil
                 self?.outputPipe = nil
                 self?.managedProcess = nil
+                self?.serverReachable = false
                 self?.message = "Server exited with status \(process.terminationStatus)."
                 await self?.refreshStatus()
             }
@@ -736,13 +737,39 @@ private extension Data {
     }
 }
 
+private final class RejectControllerRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
+
 enum AppConfiguration {
     static let port = Int(ProcessInfo.processInfo.environment["BHYVE_CONTROLLER_PORT"] ?? "3030") ?? 3030
     static let controllerURL = URL(string: "http://127.0.0.1:\(port)")!
+    static let controllerOrigin = canonicalLoopbackOrigin(controllerURL)!
     static let appToken = resolveAppToken()
+    static let identityRequestTimeout: TimeInterval = 2
+    static let maximumIdentityResponseBytes = 4096
+
+    private static let controllerSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = identityRequestTimeout
+        configuration.timeoutIntervalForResource = identityRequestTimeout
+        configuration.connectionProxyDictionary = [:]
+        return URLSession(
+            configuration: configuration,
+            delegate: RejectControllerRedirects(),
+            delegateQueue: nil)
+    }()
 
     private static let serviceName = "bhyve-local-controller"
-    private static let protocolVersion = 1
+    static let protocolVersion = 2
     private static let identityPurpose = "identity"
     private static let shutdownPurpose = "shutdown"
     private static let allowedExternalHosts: Set<String> = [
@@ -755,6 +782,7 @@ enum AppConfiguration {
         let service: String
         let protocolVersion: Int
         let challenge: String
+        let origin: String
         let proof: String
     }
 
@@ -854,23 +882,38 @@ enum AppConfiguration {
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let request = URLRequest(
+                url: url,
+                cachePolicy: .reloadIgnoringLocalCacheData,
+                timeoutInterval: identityRequestTimeout)
+            let (bytes, response) = try await controllerSession.bytes(for: request)
+            var data = Data()
+            data.reserveCapacity(maximumIdentityResponseBytes)
+            for try await byte in bytes {
+                guard data.count < maximumIdentityResponseBytes else {
+                    return nil
+                }
+                data.append(byte)
+            }
             guard
                 let httpResponse = response as? HTTPURLResponse,
                 httpResponse.statusCode == 200,
                 httpResponse.url == url,
-                data.count <= 4096,
                 let identity = try? JSONDecoder().decode(ControllerIdentity.self, from: data),
                 identity.service == serviceName,
                 identity.protocolVersion == protocolVersion,
                 identity.challenge == challenge,
+                identity.origin == controllerOrigin,
                 let proof = Data(base64URLEncoded: identity.proof)
             else {
                 return nil
             }
 
             let key = SymmetricKey(data: Data(appToken.utf8))
-            let message = controllerProofMessage(purpose: identityPurpose, challenge: challenge)
+            let message = controllerProofMessage(
+                purpose: identityPurpose,
+                origin: controllerOrigin,
+                challenge: challenge)
             return HMAC<SHA256>.isValidAuthenticationCode(proof, authenticating: message, using: key)
                 ? challenge
                 : nil
@@ -892,12 +935,17 @@ enum AppConfiguration {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(challenge, forHTTPHeaderField: "X-Controller-Challenge")
         request.setValue(
-            controllerProof(appToken: appToken, purpose: shutdownPurpose, challenge: challenge),
+            controllerProof(
+                appToken: appToken,
+                purpose: shutdownPurpose,
+                origin: controllerOrigin,
+                challenge: challenge),
             forHTTPHeaderField: "X-Controller-Proof")
         request.httpBody = Data("{}".utf8)
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            request.timeoutInterval = identityRequestTimeout
+            let (_, response) = try await controllerSession.data(for: request)
             guard
                 let httpResponse = response as? HTTPURLResponse,
                 httpResponse.url == url
@@ -910,16 +958,36 @@ enum AppConfiguration {
         }
     }
 
-    private static func controllerProof(appToken: String, purpose: String, challenge: String) -> String {
+    static func controllerProof(appToken: String, purpose: String, origin: String, challenge: String) -> String {
         let key = SymmetricKey(data: Data(appToken.utf8))
         let code = HMAC<SHA256>.authenticationCode(
-            for: controllerProofMessage(purpose: purpose, challenge: challenge),
+            for: controllerProofMessage(purpose: purpose, origin: origin, challenge: challenge),
             using: key)
         return Data(code).base64URLEncodedString()
     }
 
-    private static func controllerProofMessage(purpose: String, challenge: String) -> Data {
-        Data("\(serviceName)\n\(protocolVersion)\n\(purpose)\n\(challenge)".utf8)
+    static func controllerProofMessage(purpose: String, origin: String, challenge: String) -> Data {
+        Data("\(serviceName)\n\(protocolVersion)\n\(purpose)\n\(origin)\n\(challenge)".utf8)
+    }
+
+    static func canonicalLoopbackOrigin(_ candidate: URL?) -> String? {
+        guard
+            let candidate,
+            candidate.scheme?.lowercased() == "http",
+            candidate.host == "127.0.0.1",
+            candidate.user == nil,
+            candidate.password == nil,
+            candidate.path.isEmpty || candidate.path == "/",
+            candidate.query == nil,
+            candidate.fragment == nil
+        else {
+            return nil
+        }
+        let originPort = candidate.port ?? 80
+        guard (1...65_535).contains(originPort) else {
+            return nil
+        }
+        return "http://127.0.0.1\(originPort == 80 ? "" : ":\(originPort)")"
     }
 
     private static func resolveAppToken() -> String {

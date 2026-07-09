@@ -36,6 +36,22 @@ export function buildTrustedHosts({ host, trustedHosts } = {}) {
   return hosts;
 }
 
+export function buildTrustedOrigins({ trustedHosts, port } = {}) {
+  const numericPort = Number(port);
+  if (!(trustedHosts instanceof Set)
+      || !Number.isInteger(numericPort)
+      || numericPort < 1
+      || numericPort > 65_535) {
+    throw new Error('trustedHosts and a valid port are required');
+  }
+
+  return new Set([...trustedHosts].map((host) => {
+    const hostname = normalizeHostname(host);
+    const formattedHost = hostname.includes(':') ? `[${hostname}]` : hostname;
+    return `http://${formattedHost}${numericPort === 80 ? '' : `:${numericPort}`}`;
+  }));
+}
+
 export function isTrustedHostHeader(hostHeader, trustedHosts) {
   const hostname = parseHostHeader(hostHeader);
   return Boolean(hostname && trustedHosts.has(hostname));
@@ -52,12 +68,15 @@ export function isTrustedRequestHost(hostHeader, trustedHosts, { remoteAddress }
   return true;
 }
 
-export function isTrustedOriginHeader(originHeader, trustedHosts) {
+export function isTrustedOriginHeader(originHeader, trustedOrigins) {
   if (!originHeader) return true;
 
   try {
-    const origin = new URL(String(originHeader));
-    return ['http:', 'https:'].includes(origin.protocol) && trustedHosts.has(normalizeHostname(origin.hostname));
+    const value = String(originHeader).trim();
+    const origin = new URL(value);
+    return trustedOrigins instanceof Set
+      && value === origin.origin
+      && trustedOrigins.has(origin.origin);
   } catch {
     return false;
   }

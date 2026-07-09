@@ -87,11 +87,29 @@ export class OrbitClient extends EventEmitter {
     return Boolean(this.token);
   }
 
+  invalidateAuthentication() {
+    const hadAuthenticationState = Boolean(
+      this.token || this.apiKey || this.sessionToken || this.userId,
+    );
+    this.closeStream();
+    this.token = null;
+    this.apiKey = null;
+    this.sessionToken = null;
+    this.userId = null;
+    this.subscribedDeviceId = null;
+    if (hadAuthenticationState) {
+      this.emit('authentication-state', false);
+    }
+  }
+
   get streamConnected() {
     return this.wsState === 'running';
   }
 
   async login() {
+    // A forced or retried login must fail closed instead of retaining a stale
+    // credential that an ordinary refresh would continue to trust.
+    this.invalidateAuthentication();
     const response = await this.requestRaw('/v1/session', {
       method: 'POST',
       authenticated: false,
@@ -109,8 +127,11 @@ export class OrbitClient extends EventEmitter {
     this.userId = response.user_id || response.userId || null;
 
     if (!this.token) {
+      this.invalidateAuthentication();
       throw new Error('Orbit login response did not include a usable token');
     }
+
+    this.emit('authentication-state', true);
 
     this.emit('log', {
       level: 'info',
@@ -131,13 +152,13 @@ export class OrbitClient extends EventEmitter {
     return this.requestRaw(`/v1/sprinkler_timer_programs?${params.toString()}`);
   }
 
-  async wateringEvents(deviceId, { page = 1, perPage = 10 } = {}) {
+  async wateringEvents(deviceId, { page = 1, perPage = 10, signal } = {}) {
     const params = new URLSearchParams({
       t: String(Date.now()),
       page: String(page),
       'per-page': String(perPage),
     });
-    return this.requestRaw(`/v1/watering_events/${encodeURIComponent(deviceId)}?${params.toString()}`);
+    return this.requestRaw(`/v1/watering_events/${encodeURIComponent(deviceId)}?${params.toString()}`, { signal });
   }
 
   async updateProgram(programId, program) {
@@ -358,14 +379,23 @@ export class OrbitClient extends EventEmitter {
     this.reconnectMs = Math.min(this.reconnectMs * 2, MAX_RECONNECT_MS);
   }
 
-  async requestRaw(endpoint, { method = 'GET', authenticated = true, body } = {}) {
+  async requestRaw(endpoint, {
+    method = 'GET',
+    authenticated = true,
+    body,
+    signal,
+  } = {}) {
     const startedAt = Date.now();
     const safeEndpoint = sanitizeEndpoint(endpoint);
+    const externalAbort = createExternalAbort(signal);
     const timeout = createRequestTimeout({
       endpoint: safeEndpoint,
       method,
       timeoutMs: this.requestTimeoutMs,
     });
+    const requestSignal = externalAbort.signal
+      ? AbortSignal.any([timeout.signal, externalAbort.signal])
+      : timeout.signal;
     let response;
     let text = '';
     try {
@@ -373,11 +403,17 @@ export class OrbitClient extends EventEmitter {
         method,
         headers: this.headers({ authenticated }),
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: timeout.signal,
+        signal: requestSignal,
       }));
-      response = await Promise.race([request, timeout.promise]);
+      response = await Promise.race([request, timeout.promise, ...externalAbort.promises]);
+      // Authentication is invalid as soon as Orbit sends rejection headers.
+      // Do not wait for an untrusted response body to finish or parse before
+      // clearing credentials and stopping the authenticated event stream.
+      if (authenticated && [401, 403].includes(response.status)) {
+        this.invalidateAuthentication();
+      }
       const responseBody = Promise.resolve().then(() => response.text());
-      text = await Promise.race([responseBody, timeout.promise]);
+      text = await Promise.race([responseBody, timeout.promise, ...externalAbort.promises]);
     } catch (error) {
       const timedOut = hasFailureCode(error, 'ORBIT_REQUEST_TIMEOUT');
       const detail = safeFailureDetail(error);
@@ -396,6 +432,7 @@ export class OrbitClient extends EventEmitter {
       throw new Error(`Orbit ${method} ${safeEndpoint} failed: ${detail}`, { cause: error });
     } finally {
       timeout.cancel();
+      externalAbort.cancel();
     }
 
     let data = null;
@@ -571,6 +608,40 @@ function createRequestTimeout({ endpoint, method, timeoutMs }) {
       timer = null;
     },
   };
+}
+
+function createExternalAbort(signal) {
+  if (signal === undefined || signal === null) {
+    return { signal: null, promises: [], cancel() {} };
+  }
+  if (!(signal instanceof AbortSignal)) {
+    throw new TypeError('signal must be an AbortSignal');
+  }
+
+  let onAbort;
+  const promise = new Promise((_resolve, reject) => {
+    onAbort = () => reject(normalizeAbortReason(signal.reason));
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+  return {
+    signal,
+    promises: [promise],
+    cancel() {
+      signal.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
+function normalizeAbortReason(reason) {
+  if (reason instanceof Error) return reason;
+  const error = new Error('Orbit request was cancelled');
+  error.name = 'AbortError';
+  error.code = 'ORBIT_REQUEST_ABORTED';
+  return error;
 }
 
 function sanitizeOperationalText(value, maxLength) {
