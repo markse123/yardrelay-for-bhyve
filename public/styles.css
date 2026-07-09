@@ -358,15 +358,25 @@ h3 {
 }
 
 .active-zone-progress {
+  -webkit-appearance: none;
+  appearance: none;
+  border: 0;
   position: absolute;
   inset: auto 0 0 0;
+  width: 100%;
   height: 4px;
   background: #252525;
 }
 
-.active-zone-progress span {
-  display: block;
-  height: 100%;
+.active-zone-progress::-webkit-progress-bar,
+.yard-run-progress::-webkit-progress-bar {
+  background: #252525;
+}
+
+.active-zone-progress::-webkit-progress-value,
+.yard-run-progress::-webkit-progress-value,
+.active-zone-progress::-moz-progress-bar,
+.yard-run-progress::-moz-progress-bar {
   background: #7ee08f;
 }
 
@@ -1039,16 +1049,23 @@ h3 {
 }
 
 .yard-run-progress {
+  -webkit-appearance: none;
+  appearance: none;
+  border: 0;
   position: absolute;
   inset: auto 0 0 0;
+  width: 100%;
   height: 4px;
   background: #252525;
 }
 
-.yard-run-progress span {
-  display: block;
-  height: 100%;
-  background: #7ee08f;
+.clipboard-copy-fallback {
+  position: fixed;
+  inset: 0 auto auto 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .yard-run-sequence {

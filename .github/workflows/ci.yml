@@ -67,6 +67,9 @@ jobs:
       - name: Validate macOS bundle metadata
         run: plutil -lint "mac/BHyveControllerApp/.build/app/YardRelay.app/Contents/Info.plist"
 
+      - name: Test macOS wrapper
+        run: swift test --package-path mac/BHyveControllerApp
+
   windows-wrapper:
     name: Windows Wrapper
     runs-on: windows-latest
@@ -76,13 +79,27 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+
       - name: Set up .NET
         uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: '10.0.x'
 
+      - name: Restore and audit locked NuGet dependencies
+        shell: pwsh
+        run: |
+          dotnet restore windows/BHyveControllerApp/BHyveControllerApp.csproj --locked-mode -p:YardRelayFailOnNuGetAudit=true
+          dotnet list windows/BHyveControllerApp/BHyveControllerApp.csproj package --vulnerable --include-transitive
+
       - name: Test Windows controller identity
         run: dotnet run --project test/WindowsServerControllerHarness/WindowsServerControllerHarness.csproj
+
+      - name: Test Windows data migration
+        run: dotnet run --project test/WindowsDataMigrationHarness/WindowsDataMigrationHarness.csproj
 
       - name: Build Windows package
         shell: pwsh

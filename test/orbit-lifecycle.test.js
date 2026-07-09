@@ -32,6 +32,30 @@ test('failed login stays stopped until a later user-triggered connection attempt
   assert.equal(streamStarts, 1);
 });
 
+test('an ordinary connection attempt logs in again after authentication is invalidated', async () => {
+  let loginAttempts = 0;
+  let streamStarts = 0;
+  const client = {
+    authenticated: true,
+    async login() {
+      loginAttempts += 1;
+      this.authenticated = true;
+    },
+    connectStream() {
+      streamStarts += 1;
+    },
+  };
+
+  await ensureOrbitConnection(client);
+  assert.equal(loginAttempts, 0);
+  assert.equal(streamStarts, 1);
+
+  client.authenticated = false;
+  await ensureOrbitConnection(client);
+  assert.equal(loginAttempts, 1);
+  assert.equal(streamStarts, 2);
+});
+
 test('scheduled refresh is installed once and reused', () => {
   const timer = { id: 'refresh-timer' };
   let schedules = 0;

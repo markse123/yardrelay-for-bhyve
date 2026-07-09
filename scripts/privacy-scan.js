@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const TEXT_DECODER = new TextDecoder('utf-8', { fatal: false });
 
@@ -23,10 +25,10 @@ const FORBIDDEN_TRACKED_PATHS = [
     id: 'tracked-build-output',
     test: (path) => path.startsWith('outputs/')
       || path.startsWith('node_modules/')
-      || path.startsWith('mac/BHyveControllerApp/.build/')
-      || path.startsWith('mac/BHyveControllerApp/.swiftpm/')
-      || path.startsWith('windows/BHyveControllerApp/bin/')
-      || path.startsWith('windows/BHyveControllerApp/obj/'),
+      || path.startsWith('mac/bhyvecontrollerapp/.build/')
+      || path.startsWith('mac/bhyvecontrollerapp/.swiftpm/')
+      || path.startsWith('windows/bhyvecontrollerapp/bin/')
+      || path.startsWith('windows/bhyvecontrollerapp/obj/'),
     message: 'Build, dependency, and package output must stay ignored.',
   },
   {
@@ -109,9 +111,27 @@ const LINE_RULES = [
   },
 ];
 
-function repositoryFiles() {
-  const output = execFileSync('git', ['ls-files', '-co', '--exclude-standard', '-z'], { encoding: 'buffer' });
+function repositoryFiles(rootDirectory) {
+  const output = execFileSync('git', ['ls-files', '-co', '--exclude-standard', '-z'], {
+    cwd: rootDirectory,
+    encoding: 'buffer',
+  });
   return output.toString('utf8').split('\0').filter(Boolean);
+}
+
+function directoryFiles(rootDirectory, currentDirectory = rootDirectory) {
+  const files = [];
+  for (const entry of readdirSync(currentDirectory, { withFileTypes: true })) {
+    if (entry.name === '.git') continue;
+
+    const absolutePath = path.join(currentDirectory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...directoryFiles(rootDirectory, absolutePath));
+    } else if (entry.isFile()) {
+      files.push(path.relative(rootDirectory, absolutePath).split(path.sep).join('/'));
+    }
+  }
+  return files.sort();
 }
 
 function isProbablyText(buffer) {
@@ -128,8 +148,10 @@ function finding(path, line, rule) {
 }
 
 export function findForbiddenPath(path) {
-  const rule = FORBIDDEN_TRACKED_PATHS.find((candidate) => candidate.test(path));
-  return rule ? finding(path, 1, rule) : null;
+  const originalPath = String(path);
+  const policyPath = originalPath.replaceAll('\\', '/').toLowerCase();
+  const rule = FORBIDDEN_TRACKED_PATHS.find((candidate) => candidate.test(policyPath));
+  return rule ? finding(originalPath, 1, rule) : null;
 }
 
 export function scanText(path, text) {
@@ -147,35 +169,64 @@ export function scanText(path, text) {
   return findings;
 }
 
-export function scanTrackedFiles(paths = repositoryFiles()) {
+export function scanTrackedFiles(paths, { rootDirectory = process.cwd() } = {}) {
+  const resolvedRoot = path.resolve(rootDirectory);
+  const files = paths ?? repositoryFiles(resolvedRoot);
   const findings = [];
   let scannedTextFiles = 0;
 
-  for (const path of paths) {
-    const pathFinding = findForbiddenPath(path);
+  for (const relativePath of files) {
+    const pathFinding = findForbiddenPath(relativePath);
     if (pathFinding) {
       findings.push(pathFinding);
       continue;
     }
 
-    const buffer = readFileSync(path);
+    const filePath = path.isAbsolute(relativePath)
+      ? relativePath
+      : path.join(resolvedRoot, relativePath);
+    const buffer = readFileSync(filePath);
     if (!isProbablyText(buffer)) {
       continue;
     }
 
     scannedTextFiles += 1;
-    findings.push(...scanText(path, TEXT_DECODER.decode(buffer)));
+    findings.push(...scanText(relativePath, TEXT_DECODER.decode(buffer)));
   }
 
   return {
     findings,
     scannedTextFiles,
-    trackedFiles: paths.length,
+    trackedFiles: files.length,
   };
 }
 
-function main() {
-  const result = scanTrackedFiles();
+export function scanDirectory(rootDirectory) {
+  const resolvedRoot = path.resolve(rootDirectory);
+  return scanTrackedFiles(directoryFiles(resolvedRoot), { rootDirectory: resolvedRoot });
+}
+
+function parseArguments(arguments_) {
+  if (arguments_.length === 0) return { directory: null };
+  if (arguments_.length === 2 && arguments_[0] === '--directory' && arguments_[1]) {
+    return { directory: arguments_[1] };
+  }
+  throw new Error('Usage: node scripts/privacy-scan.js [--directory <path>]');
+}
+
+function main(arguments_ = process.argv.slice(2)) {
+  let options;
+  try {
+    options = parseArguments(arguments_);
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+    return;
+  }
+
+  const result = options.directory
+    ? scanDirectory(options.directory)
+    : scanTrackedFiles();
 
   if (result.findings.length > 0) {
     console.error(`Privacy scan failed: ${result.findings.length} finding(s).`);
@@ -186,9 +237,13 @@ function main() {
     return;
   }
 
-  console.log(`Privacy scan passed: scanned ${result.scannedTextFiles} text file(s) from ${result.trackedFiles} tracked or untracked repository file(s).`);
+  const source = options.directory ? 'package directory' : 'tracked or untracked repository';
+  console.log(`Privacy scan passed: scanned ${result.scannedTextFiles} text file(s) from ${result.trackedFiles} ${source} file(s).`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const isMainModule = process.argv[1]
+  && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+
+if (isMainModule) {
   main();
 }

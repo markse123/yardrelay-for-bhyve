@@ -20,40 +20,81 @@ public sealed class ServerController : IDisposable
 {
     private readonly DesktopPaths _paths;
     private readonly AppLogger _logger;
+    private readonly object _stateGate = new();
+    private readonly int _startupProbeAttempts;
+    private readonly TimeSpan _startupProbeDelay;
+    private readonly TimeSpan _identityMonitorInterval;
     private readonly HttpClient _httpClient = new(new HttpClientHandler
     {
         AllowAutoRedirect = false,
         UseProxy = false,
     });
     private Process? _process;
-    private DesktopSettings? _settings;
-    private DesktopSecrets? _secrets;
+    private DesktopSettings? _activeSettings;
+    private DesktopSecrets? _activeSecrets;
+    private string? _verifiedOrigin;
+    private string? _verifiedAppToken;
+    private CancellationTokenSource? _identityMonitorCancellation;
     private bool _serviceVerified;
 
     public event Action<string>? MessageChanged;
+    public event Action? TrustRevoked;
 
-    public bool IsManagedRunning => _process is { HasExited: false };
-    public Uri? ControllerUri => _settings is null ? null : new Uri($"http://{_settings.Host}:{_settings.Port}");
+    public bool IsManagedRunning
+    {
+        get
+        {
+            lock (_stateGate)
+            {
+                return IsProcessRunning(_process);
+            }
+        }
+    }
+    public Uri? ControllerUri
+    {
+        get
+        {
+            lock (_stateGate)
+            {
+                return _serviceVerified && _verifiedOrigin is not null
+                    ? new Uri(_verifiedOrigin)
+                    : null;
+            }
+        }
+    }
     public Uri? ControllerBrowserUri
     {
         get
         {
-            var controllerUri = ControllerUri;
-            if (!_serviceVerified || controllerUri is null || string.IsNullOrWhiteSpace(_secrets?.AppToken))
+            string? verifiedOrigin;
+            string? verifiedAppToken;
+            lock (_stateGate)
             {
-                return null;
+                if (!_serviceVerified
+                    || string.IsNullOrWhiteSpace(_verifiedOrigin)
+                    || string.IsNullOrWhiteSpace(_verifiedAppToken))
+                {
+                    return null;
+                }
+                verifiedOrigin = _verifiedOrigin;
+                verifiedAppToken = _verifiedAppToken;
             }
 
-            return new UriBuilder(controllerUri)
+            return new UriBuilder(new Uri(verifiedOrigin))
             {
-                Fragment = $"token={Uri.EscapeDataString(_secrets.AppToken)}",
+                Fragment = $"token={Uri.EscapeDataString(verifiedAppToken)}",
             }.Uri;
         }
     }
 
     public bool IsControllerNavigationUri(Uri? candidate)
     {
-        var controllerUri = ControllerUri;
+        string? verifiedOrigin;
+        lock (_stateGate)
+        {
+            verifiedOrigin = _serviceVerified ? _verifiedOrigin : null;
+        }
+        var controllerUri = verifiedOrigin is null ? null : new Uri(verifiedOrigin);
         return controllerUri is not null
             && candidate is { IsAbsoluteUri: true }
             && string.Equals(candidate.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
@@ -63,10 +104,30 @@ public sealed class ServerController : IDisposable
             && string.IsNullOrEmpty(candidate.UserInfo);
     }
 
-    public ServerController(DesktopPaths paths, AppLogger logger)
+    public ServerController(
+        DesktopPaths paths,
+        AppLogger logger,
+        int startupProbeAttempts = 24,
+        TimeSpan? startupProbeDelay = null,
+        TimeSpan? identityMonitorInterval = null)
     {
+        if (startupProbeAttempts < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(startupProbeAttempts));
+        }
         _paths = paths;
         _logger = logger;
+        _startupProbeAttempts = startupProbeAttempts;
+        _startupProbeDelay = startupProbeDelay ?? TimeSpan.FromMilliseconds(500);
+        _identityMonitorInterval = identityMonitorInterval ?? TimeSpan.FromSeconds(2);
+        if (_startupProbeDelay < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(startupProbeDelay));
+        }
+        if (_identityMonitorInterval <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(identityMonitorInterval));
+        }
     }
 
     public async Task<ControllerProbeResult> ProbeAsync(
@@ -79,8 +140,8 @@ public sealed class ServerController : IDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
         try
         {
-            var identityUri = new Uri(
-                $"http://{settings.Host}:{settings.Port}/api/identity?challenge={Uri.EscapeDataString(challenge)}");
+            var expectedOrigin = ServiceIdentity.CreateLoopbackOrigin(settings.Host, settings.Port);
+            var identityUri = new Uri($"{expectedOrigin}/api/identity?challenge={Uri.EscapeDataString(challenge)}");
             using var response = await _httpClient.GetAsync(
                 identityUri,
                 HttpCompletionOption.ResponseHeadersRead,
@@ -97,10 +158,12 @@ public sealed class ServerController : IDisposable
                 && string.Equals(identity.Service, ServiceIdentity.ServiceName, StringComparison.Ordinal)
                 && identity.ProtocolVersion == ServiceIdentity.ProtocolVersion
                 && string.Equals(identity.Challenge, challenge, StringComparison.Ordinal)
+                && string.Equals(identity.Origin, expectedOrigin, StringComparison.Ordinal)
                 && ServiceIdentity.VerifyProof(
                     secrets.AppToken,
                     challenge,
                     ServiceIdentity.IdentityPurpose,
+                    expectedOrigin,
                     identity.Proof)
                     ? new ControllerProbeResult(ControllerProbeStatus.Verified, challenge)
                     : new ControllerProbeResult(ControllerProbeStatus.Untrusted);
@@ -133,24 +196,32 @@ public sealed class ServerController : IDisposable
 
     public async Task StartAsync(string nodePath, DesktopSettings settings, DesktopSecrets secrets, CancellationToken cancellationToken = default)
     {
-        _settings = settings;
-        _secrets = secrets;
-        _paths.EnsureUserDirectories();
-        Directory.CreateDirectory(settings.DataDir);
-        Directory.CreateDirectory(Path.GetDirectoryName(settings.YardRunConfigPath) ?? _paths.ConfigDir);
-
         if (IsManagedRunning)
         {
             SetMessage("Server is already running from this app.");
             return;
         }
 
-        _serviceVerified = false;
+        var settingsSnapshot = SnapshotSettings(settings);
+        var secretsSnapshot = SnapshotSecrets(secrets);
+        RevokeTrust();
+        ClearStoppedProcess();
+        lock (_stateGate)
+        {
+            _activeSettings = settingsSnapshot;
+            _activeSecrets = secretsSnapshot;
+        }
+        _paths.EnsureUserDirectories();
+        Directory.CreateDirectory(settingsSnapshot.DataDir);
+        Directory.CreateDirectory(Path.GetDirectoryName(settingsSnapshot.YardRunConfigPath) ?? _paths.ConfigDir);
 
-        var existing = await ProbeAsync(settings, secrets, cancellationToken);
+        var existing = await ProbeAsync(settingsSnapshot, secretsSnapshot, cancellationToken);
         if (existing.Status == ControllerProbeStatus.Verified)
         {
-            _serviceVerified = true;
+            if (!EstablishTrust(settingsSnapshot, secretsSnapshot))
+            {
+                throw new InvalidOperationException("The existing controller could not retain verified trust.");
+            }
             SetMessage("A controller server is already reachable on the configured port.");
             return;
         }
@@ -175,45 +246,65 @@ public sealed class ServerController : IDisposable
         };
         AddBaseEnvironment(startInfo);
         startInfo.ArgumentList.Add("server/app.js");
-        startInfo.Environment["ORBIT_EMAIL"] = secrets.OrbitEmail;
-        startInfo.Environment["ORBIT_PASSWORD"] = secrets.OrbitPassword;
-        startInfo.Environment["APP_TOKEN"] = secrets.AppToken;
-        startInfo.Environment["HOST"] = settings.Host;
-        startInfo.Environment["PORT"] = settings.Port.ToString();
-        startInfo.Environment["BHYVE_DATA_DIR"] = settings.DataDir;
-        startInfo.Environment["YARD_RUN_CONFIG"] = settings.YardRunConfigPath;
-        startInfo.Environment["WRITE_ACCESS_MODE"] = settings.WriteAccessMode;
+        startInfo.Environment["ORBIT_EMAIL"] = secretsSnapshot.OrbitEmail;
+        startInfo.Environment["ORBIT_PASSWORD"] = secretsSnapshot.OrbitPassword;
+        startInfo.Environment["APP_TOKEN"] = secretsSnapshot.AppToken;
+        startInfo.Environment["HOST"] = settingsSnapshot.Host;
+        startInfo.Environment["PORT"] = settingsSnapshot.Port.ToString();
+        startInfo.Environment["BHYVE_DATA_DIR"] = settingsSnapshot.DataDir;
+        startInfo.Environment["YARD_RUN_CONFIG"] = settingsSnapshot.YardRunConfigPath;
+        startInfo.Environment["WRITE_ACCESS_MODE"] = settingsSnapshot.WriteAccessMode;
 
-        _process = new Process
+        var process = new Process
         {
             StartInfo = startInfo,
             EnableRaisingEvents = true,
         };
-        _process.OutputDataReceived += (_, args) => LogServerLine(args.Data);
-        _process.ErrorDataReceived += (_, args) => LogServerLine(args.Data);
-        _process.Exited += (_, _) =>
-        {
-            SetMessage($"Server exited with status {_process?.ExitCode}.");
-            _logger.Warn($"server exited status={_process?.ExitCode}");
-        };
+        process.OutputDataReceived += (_, args) => LogServerLine(args.Data);
+        process.ErrorDataReceived += (_, args) => LogServerLine(args.Data);
+        process.Exited += (_, _) => HandleProcessExited(process);
 
-        if (!_process.Start())
+        if (!process.Start())
         {
+            process.Dispose();
             throw new InvalidOperationException("Could not start the controller server.");
         }
 
-        _process.BeginOutputReadLine();
-        _process.BeginErrorReadLine();
+        lock (_stateGate)
+        {
+            _process = process;
+        }
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
         _logger.Info("started managed controller server");
         SetMessage("Starting controller server...");
-        await WaitUntilReachableAsync(settings, secrets, cancellationToken);
-        _serviceVerified = true;
+        try
+        {
+            await WaitUntilReachableAsync(settingsSnapshot, secretsSnapshot, cancellationToken);
+            if (!EstablishTrust(settingsSnapshot, secretsSnapshot, process))
+            {
+                throw new InvalidOperationException("The controller process exited before service identity was verified.");
+            }
+        }
+        catch
+        {
+            RevokeTrust(process, clearProcess: true);
+            TryKill(process);
+            process.Dispose();
+            throw;
+        }
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
-        var settings = _settings;
-        var secrets = _secrets;
+        RevokeTrust();
+        DesktopSettings? settings;
+        DesktopSecrets? secrets;
+        lock (_stateGate)
+        {
+            settings = _activeSettings;
+            secrets = _activeSecrets;
+        }
         if (settings is not null && secrets is not null)
         {
             var probe = await ProbeAsync(settings, secrets, cancellationToken);
@@ -221,7 +312,8 @@ public sealed class ServerController : IDisposable
             {
                 try
                 {
-                    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://{settings.Host}:{settings.Port}/api/shutdown")
+                    var controllerOrigin = ServiceIdentity.CreateLoopbackOrigin(settings.Host, settings.Port);
+                    using var request = new HttpRequestMessage(HttpMethod.Post, $"{controllerOrigin}/api/shutdown")
                     {
                         Content = new StringContent("{}", Encoding.UTF8, "application/json"),
                     };
@@ -231,7 +323,8 @@ public sealed class ServerController : IDisposable
                         ServiceIdentity.CreateProof(
                             secrets.AppToken,
                             probe.Challenge,
-                            ServiceIdentity.ShutdownPurpose));
+                            ServiceIdentity.ShutdownPurpose,
+                            controllerOrigin));
                     await _httpClient.SendAsync(request, cancellationToken);
                 }
                 catch (Exception error)
@@ -241,7 +334,12 @@ public sealed class ServerController : IDisposable
             }
         }
 
-        if (_process is { HasExited: false } process)
+        Process? process;
+        lock (_stateGate)
+        {
+            process = _process;
+        }
+        if (process is not null && IsProcessRunning(process))
         {
             try
             {
@@ -251,12 +349,18 @@ public sealed class ServerController : IDisposable
             }
             catch
             {
-                TryKill(_process);
+                TryKill(process);
             }
         }
 
-        _process = null;
-        _serviceVerified = false;
+        lock (_stateGate)
+        {
+            if (ReferenceEquals(_process, process))
+            {
+                _process = null;
+            }
+        }
+        process?.Dispose();
         SetMessage("Server is stopped.");
         _logger.Info("stopped managed controller server");
     }
@@ -269,12 +373,16 @@ public sealed class ServerController : IDisposable
 
     public void Dispose()
     {
+        RevokeTrust();
         _httpClient.Dispose();
-        if (_process is { HasExited: false })
+        Process? process;
+        lock (_stateGate)
         {
-            TryKill(_process);
+            process = _process;
+            _process = null;
         }
-        _process?.Dispose();
+        TryKill(process);
+        process?.Dispose();
     }
 
     private async Task WaitUntilReachableAsync(
@@ -282,7 +390,7 @@ public sealed class ServerController : IDisposable
         DesktopSecrets secrets,
         CancellationToken cancellationToken)
     {
-        for (var attempt = 0; attempt < 24; attempt += 1)
+        for (var attempt = 0; attempt < _startupProbeAttempts; attempt += 1)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var probe = await ProbeAsync(settings, secrets, cancellationToken);
@@ -295,10 +403,85 @@ public sealed class ServerController : IDisposable
             {
                 throw new InvalidOperationException("The configured port was claimed by a service that could not authenticate as this controller.");
             }
-            await Task.Delay(500, cancellationToken);
+            await Task.Delay(_startupProbeDelay, cancellationToken);
         }
 
         SetMessage("Server started but did not become reachable.");
+        throw new TimeoutException("Server started but did not become reachable or prove its identity.");
+    }
+
+    private bool EstablishTrust(
+        DesktopSettings settings,
+        DesktopSecrets secrets,
+        Process? expectedProcess = null)
+    {
+        var verifiedOrigin = ServiceIdentity.CreateLoopbackOrigin(settings.Host, settings.Port);
+        var monitorCancellation = new CancellationTokenSource();
+        CancellationTokenSource? previousMonitor;
+        lock (_stateGate)
+        {
+            if (expectedProcess is not null
+                && (!ReferenceEquals(_process, expectedProcess) || !IsProcessRunning(expectedProcess)))
+            {
+                monitorCancellation.Dispose();
+                return false;
+            }
+
+            previousMonitor = _identityMonitorCancellation;
+            _identityMonitorCancellation = monitorCancellation;
+            _verifiedOrigin = verifiedOrigin;
+            _verifiedAppToken = secrets.AppToken;
+            _serviceVerified = true;
+        }
+        previousMonitor?.Cancel();
+        _ = MonitorVerifiedServiceAsync(
+            SnapshotSettings(settings),
+            SnapshotSecrets(secrets),
+            monitorCancellation);
+        return true;
+    }
+
+    private async Task MonitorVerifiedServiceAsync(
+        DesktopSettings settings,
+        DesktopSecrets secrets,
+        CancellationTokenSource monitorCancellation)
+    {
+        var cancellationToken = monitorCancellation.Token;
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(_identityMonitorInterval, cancellationToken);
+                var probe = await ProbeAsync(settings, secrets, cancellationToken);
+                if (probe.Status == ControllerProbeStatus.Verified)
+                {
+                    continue;
+                }
+
+                if (RevokeTrust(expectedMonitor: monitorCancellation))
+                {
+                    SetMessage("Controller identity could no longer be verified. Browser trust was revoked.");
+                    _logger.Warn($"controller identity monitor revoked trust status={probe.Status}");
+                }
+                return;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Expected when trust is revoked, the controller stops, or the app exits.
+        }
+        catch (Exception error)
+        {
+            if (RevokeTrust(expectedMonitor: monitorCancellation))
+            {
+                SetMessage("Controller identity monitoring failed. Browser trust was revoked.");
+                _logger.Warn($"controller identity monitor failed: {Redactor.ForLog(error.Message)}");
+            }
+        }
+        finally
+        {
+            monitorCancellation.Dispose();
+        }
     }
 
     private void LogServerLine(string? line)
@@ -316,6 +499,113 @@ public sealed class ServerController : IDisposable
     private void SetMessage(string message)
     {
         MessageChanged?.Invoke(message);
+    }
+
+    private void HandleProcessExited(Process process)
+    {
+        int? exitCode = null;
+        try
+        {
+            exitCode = process.ExitCode;
+        }
+        catch
+        {
+            // The process can be disposed concurrently during explicit shutdown.
+        }
+
+        if (!RevokeTrust(process, clearProcess: true))
+        {
+            return;
+        }
+        SetMessage($"Server exited with status {exitCode?.ToString() ?? "unknown"}.");
+        _logger.Warn($"server exited status={exitCode?.ToString() ?? "unknown"}");
+    }
+
+    private bool RevokeTrust(
+        Process? expectedProcess = null,
+        bool clearProcess = false,
+        CancellationTokenSource? expectedMonitor = null)
+    {
+        bool notify;
+        CancellationTokenSource? monitorCancellation;
+        lock (_stateGate)
+        {
+            if (expectedProcess is not null && !ReferenceEquals(_process, expectedProcess))
+            {
+                return false;
+            }
+            if (expectedMonitor is not null
+                && !ReferenceEquals(_identityMonitorCancellation, expectedMonitor))
+            {
+                return false;
+            }
+            notify = _serviceVerified;
+            _serviceVerified = false;
+            _verifiedOrigin = null;
+            _verifiedAppToken = null;
+            monitorCancellation = _identityMonitorCancellation;
+            _identityMonitorCancellation = null;
+            if (clearProcess)
+            {
+                _process = null;
+            }
+        }
+        monitorCancellation?.Cancel();
+        if (notify)
+        {
+            TrustRevoked?.Invoke();
+        }
+        return true;
+    }
+
+    private static DesktopSettings SnapshotSettings(DesktopSettings source)
+    {
+        return new DesktopSettings
+        {
+            Version = source.Version,
+            Host = source.Host,
+            Port = source.Port,
+            NodePath = source.NodePath,
+            DataDir = source.DataDir,
+            YardRunConfigPath = source.YardRunConfigPath,
+            RequireWriteToken = source.RequireWriteToken,
+        };
+    }
+
+    private static DesktopSecrets SnapshotSecrets(DesktopSecrets source)
+    {
+        return new DesktopSecrets
+        {
+            OrbitEmail = source.OrbitEmail,
+            OrbitPassword = source.OrbitPassword,
+            AppToken = source.AppToken,
+        };
+    }
+
+    private void ClearStoppedProcess()
+    {
+        Process? stopped = null;
+        lock (_stateGate)
+        {
+            if (_process is not null && !IsProcessRunning(_process))
+            {
+                stopped = _process;
+                _process = null;
+            }
+        }
+        stopped?.Dispose();
+    }
+
+    private static bool IsProcessRunning(Process? process)
+    {
+        try
+        {
+            return process is not null && !process.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static void TryKill(Process? process)
@@ -374,6 +664,7 @@ public sealed class ServerController : IDisposable
         public string Service { get; init; } = string.Empty;
         public int ProtocolVersion { get; init; }
         public string Challenge { get; init; } = string.Empty;
+        public string Origin { get; init; } = string.Empty;
         public string Proof { get; init; } = string.Empty;
     }
 

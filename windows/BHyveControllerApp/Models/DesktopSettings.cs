@@ -15,7 +15,7 @@ public sealed class DesktopSettings
     public bool IsComplete()
     {
         return Version >= 1
-            && Host is "127.0.0.1" or "localhost"
+            && Host == "127.0.0.1"
             && Port is >= 1024 and <= 65535
             && !string.IsNullOrWhiteSpace(DataDir)
             && !string.IsNullOrWhiteSpace(YardRunConfigPath);

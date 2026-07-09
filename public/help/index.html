@@ -178,14 +178,21 @@
             <a href="https://developer.microsoft.com/en-us/microsoft-edge/webview2/" target="_blank" rel="noopener noreferrer">Download WebView2</a>
           </p>
 
-          <h3>2. Enter account and server settings</h3>
+          <h3>2. Download and verify an unsigned beta</h3>
+          <ol>
+            <li>Download <code>YardRelaySetup-&lt;version&gt;.exe</code> and its SHA-256 checksum only from the verified YardRelay GitHub release page.</li>
+            <li>In PowerShell, run <code>Get-FileHash .\YardRelaySetup-&lt;version&gt;.exe -Algorithm SHA256</code> and compare the complete result with the release value. Do not run the installer if they differ.</li>
+            <li>Run the installer. This beta is unsigned, so Microsoft Defender SmartScreen may display <strong>Windows protected your PC</strong> and <strong>Unknown publisher</strong>. Only after the source and checksum match, select <strong>More info</strong>, confirm the expected YardRelay filename, and select <strong>Run anyway</strong>. Do not bypass any different warning.</li>
+          </ol>
+
+          <h3>3. Enter account and server settings</h3>
           <ul>
             <li>Enter the email address and password for your Orbit B-hyve account.</li>
             <li>Keep port <code>3030</code> unless another local app already uses it.</li>
             <li>Leave Node path empty when the app detects a suitable Node.js installation.</li>
           </ul>
 
-          <h3>3. Test and save</h3>
+          <h3>4. Test and save</h3>
           <ol>
             <li>Select <strong>Test Orbit Login</strong>. The test reads account metadata and does not start watering or change programs.</li>
             <li>Optionally import an existing <code>.env</code> file or yard-run configuration when migrating from a source checkout.</li>
@@ -195,6 +202,13 @@
             A failed login test does not always mean the credentials are wrong. Orbit or the internet connection
             may be temporarily unavailable. You can save and retry later.
           </div>
+
+          <h3>Uninstall</h3>
+          <p>
+            Open <strong>Windows Settings &gt; Apps &gt; Installed apps</strong>, find <strong>YardRelay</strong>, and choose
+            <strong>Uninstall</strong>. The app is removed, but <code>%LOCALAPPDATA%\YardRelay</code> is preserved so
+            settings, encrypted credentials, configuration, snapshots, and logs are not deleted automatically.
+          </p>
         </section>
 
         <section id="macos-setup" class="topic-card" data-topic data-keywords="mac macos setup source checkout env swift build node terminal application wrapper">
@@ -378,12 +392,12 @@
             </div>
             <div>
               <dt>Release checks</dt>
-              <dd>Remain disabled until the separate private release repository exists and has been verified. The app does not silently download or install updates.</dd>
+              <dd>Remain disabled while the clean-history project repository is private and until its public release destination has been verified. The app does not silently download or install updates.</dd>
             </div>
           </dl>
           <p class="link-row">
 <!-- BEGIN GENERATED:RELEASE-LINK -->
-            <span>Release checks will be enabled after the private release repository is created and verified.</span>
+            <span>Release checks will be enabled after this clean-history repository is public and its release destination is verified.</span>
 <!-- END GENERATED:RELEASE-LINK -->
           </p>
         </section>
@@ -458,6 +472,7 @@
           <p class="section-label">Important</p>
           <h2>Privacy and safety</h2>
           <ul class="check-list">
+            <li>YardRelay sends no project-operated telemetry, but it must send Orbit credentials to Orbit's login service and exchange account/device state and control commands with Orbit's cloud services.</li>
             <li>Keep the controller bound to loopback unless you have deliberately configured and secured private-network access.</li>
             <li>Never expose the Node server directly to the public internet.</li>
             <li>Keep Orbit credentials and <code>APP_TOKEN</code> out of Git, screenshots, issue reports, and chat messages.</li>
@@ -484,13 +499,27 @@
 
           <h3>Where desktop data lives</h3>
           <ul>
-            <li><strong>Windows private-development builds:</strong> settings, config, data, and logs currently remain under the legacy <code>%LOCALAPPDATA%\BHyveController</code> path. Public builds will migrate to <code>%LOCALAPPDATA%\YardRelay</code> only after migration tests are complete. Secrets are encrypted for the current Windows user.</li>
+            <li><strong>Windows:</strong> settings, config, data, and logs live under <code>%LOCALAPPDATA%\YardRelay</code>. Secrets are encrypted for the current Windows user.</li>
+            <li><strong>Legacy Windows data:</strong> the app uses an existing YardRelay folder unchanged. Only when that destination is absent, it makes a staged one-time copy of <code>%LOCALAPPDATA%\BHyveController</code>, retains the legacy source, and never merges or overwrites an existing destination. Later startups are a no-op. Only copied paths that exactly match the old default data and yard-run config locations are rewritten; custom paths stay unchanged.</li>
             <li><strong>macOS today:</strong> the wrapper reads the source checkout and its private <code>.env</code>. Native Keychain and Application Support parity is planned separately.</li>
           </ul>
 
+          <h3>Back up or restore Windows data</h3>
+          <ol>
+            <li>Quit YardRelay and make sure its managed controller has stopped.</li>
+            <li>Back up the complete <code>%LOCALAPPDATA%\YardRelay</code> folder to private storage.</li>
+            <li>Restore only while YardRelay is stopped. Never merge a backup over an existing app-data folder: rename or move the existing YardRelay directory first, then copy the backup into that exact path.</li>
+            <li>DPAPI binds <code>secrets.bin</code> to the Windows user/profile that created it. It is not portable to another profile or computer; re-enter Orbit credentials when restoring elsewhere.</li>
+          </ol>
+          <p>
+            This is manual local backup/restore, not an encrypted archive feature. Only <code>secrets.bin</code> is
+            DPAPI-protected. Other files can contain sensitive property or device data in plaintext, so keep backups
+            private and encrypted at rest.
+          </p>
+
           <div class="callout info">
-            This guide is bundled with the installed app version. Check the release page for a newer app and manual;
-            the app does not silently replace its own binaries.
+            This guide is bundled with the installed app version. When the verified public release page is available,
+            use it to check for a newer app and manual; the app does not silently replace its own binaries.
           </div>
         </section>
       </main>

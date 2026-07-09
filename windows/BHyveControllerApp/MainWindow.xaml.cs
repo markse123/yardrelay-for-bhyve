@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Threading;
 using BHyveControllerApp.Models;
 using BHyveControllerApp.Services;
 using Microsoft.Web.WebView2.Core;
@@ -11,7 +12,7 @@ namespace BHyveControllerApp;
 
 public partial class MainWindow : Window
 {
-    private readonly DesktopPaths _paths = new();
+    private readonly DesktopPaths _paths;
     private readonly SettingsStore _settingsStore;
     private readonly SecretStore _secretStore;
     private readonly NodeRuntime _nodeRuntime = new();
@@ -23,19 +24,23 @@ public partial class MainWindow : Window
     private string? _importedAppToken;
     private bool _setupVisible;
     private bool _webViewSecurityConfigured;
+    private bool _closeInProgress;
+    private bool _closeReady;
     private HelpWindow? _helpWindow;
 
-    public MainWindow()
+    internal MainWindow(DesktopPaths paths)
     {
+        _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         InitializeComponent();
         _settingsStore = new SettingsStore(_paths);
         _secretStore = new SecretStore(_paths);
         _logger = new AppLogger(_paths);
-        _server = new ServerController(_paths, _logger);
-        _server.MessageChanged += message => Dispatcher.Invoke(() => SetStatus(message));
         _settings = _settingsStore.LoadOrDefault();
         _secrets = SafeLoadSecrets();
         _nodeCheck = _nodeRuntime.FindUsableNode(_settings.NodePath);
+        _server = new ServerController(_paths, _logger);
+        _server.MessageChanged += Server_MessageChanged;
+        _server.TrustRevoked += Server_TrustRevoked;
         Loaded += MainWindow_Loaded;
     }
 
@@ -86,6 +91,7 @@ public partial class MainWindow : Window
         {
             await ControllerWebView.EnsureCoreWebView2Async();
             ConfigureWebViewSecurity();
+            ControllerWebView.Visibility = Visibility.Visible;
             ControllerWebView.Source = _server.ControllerBrowserUri;
         }
         catch (Exception error)
@@ -125,8 +131,34 @@ public partial class MainWindow : Window
 
     private bool IsAllowedControllerNavigation(string? value)
     {
-        return Uri.TryCreate(value, UriKind.Absolute, out var candidate)
-            && _server.IsControllerNavigationUri(candidate);
+        return string.Equals(value, "about:blank", StringComparison.OrdinalIgnoreCase)
+            || (Uri.TryCreate(value, UriKind.Absolute, out var candidate)
+                && _server.IsControllerNavigationUri(candidate));
+    }
+
+    private void Server_MessageChanged(string message)
+    {
+        Dispatcher.BeginInvoke(() => SetStatus(message));
+    }
+
+    private void Server_TrustRevoked()
+    {
+        Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(RevokeControllerWebViewTrust));
+    }
+
+    private void RevokeControllerWebViewTrust()
+    {
+        ReloadButton.IsEnabled = false;
+        ControllerWebView.Visibility = Visibility.Collapsed;
+        if (ControllerWebView.CoreWebView2 is not null)
+        {
+            ControllerWebView.CoreWebView2.Stop();
+            ControllerWebView.CoreWebView2.Navigate("about:blank");
+        }
+        else
+        {
+            ControllerWebView.Source = new Uri("about:blank");
+        }
     }
 
     private DesktopSecrets SafeLoadSecrets()
@@ -212,7 +244,7 @@ public partial class MainWindow : Window
         StartButton.IsEnabled = !_server.IsManagedRunning;
         StopButton.IsEnabled = _server.IsManagedRunning;
         RestartButton.IsEnabled = _settings.IsComplete() && _secrets.IsComplete();
-        ReloadButton.IsEnabled = !_setupVisible;
+        ReloadButton.IsEnabled = !_setupVisible && _server.ControllerBrowserUri is not null;
     }
 
     private void SetSetupMessage(string message)
@@ -239,13 +271,28 @@ public partial class MainWindow : Window
 
     private async void RestartButton_Click(object sender, RoutedEventArgs e)
     {
+        await RestartControllerAsync();
+    }
+
+    private async Task RestartControllerAsync()
+    {
+        RefreshNodeStatus();
         if (_nodeCheck.Path is null)
         {
             ShowSetup("Node.js 24 or newer is required.");
             return;
         }
-        await _server.RestartAsync(_nodeCheck.Path, _settings, _secrets);
-        await LoadWebViewAsync();
+        try
+        {
+            await _server.RestartAsync(_nodeCheck.Path, _settings, _secrets);
+            await LoadWebViewAsync();
+        }
+        catch (Exception error)
+        {
+            var safeMessage = Redactor.ForLog(error.Message);
+            _logger.Warn($"restart failed: {safeMessage}");
+            ShowSetup(safeMessage);
+        }
     }
 
     private void ReloadButton_Click(object sender, RoutedEventArgs e)
@@ -389,12 +436,23 @@ public partial class MainWindow : Window
             return;
         }
 
+        var shouldRestart = _server.IsManagedRunning || _server.ControllerBrowserUri is not null;
         CaptureFormValues();
         _paths.EnsureUserDirectories();
         _settingsStore.Save(_settings);
         _secretStore.Save(_secrets);
         _logger.Info("saved desktop setup");
-        await StartControllerAsync();
+        SetSetupMessage(shouldRestart
+            ? "Settings saved. Restarting the controller to apply changes..."
+            : "Settings saved. Starting the controller...");
+        if (shouldRestart)
+        {
+            await RestartControllerAsync();
+        }
+        else
+        {
+            await StartControllerAsync();
+        }
     }
 
     private void CancelSetupButton_Click(object sender, RoutedEventArgs e)
@@ -436,11 +494,45 @@ public partial class MainWindow : Window
         SetSetupMessage("Diagnostics copied to clipboard.");
     }
 
-    protected override async void OnClosing(CancelEventArgs e)
+    protected override void OnClosing(CancelEventArgs e)
     {
-        await _server.StopAsync();
-        _server.Dispose();
+        if (_closeReady)
+        {
+            base.OnClosing(e);
+            return;
+        }
+
         base.OnClosing(e);
+        e.Cancel = true;
+        if (_closeInProgress)
+        {
+            return;
+        }
+
+        _closeInProgress = true;
+        IsEnabled = false;
+        _ = CompleteCloseAsync();
+    }
+
+    private async Task CompleteCloseAsync()
+    {
+        try
+        {
+            await _server.StopAsync();
+        }
+        catch (Exception error)
+        {
+            _logger.Warn($"close cleanup failed: {Redactor.ForLog(error.Message)}");
+        }
+        finally
+        {
+            _server.MessageChanged -= Server_MessageChanged;
+            _server.TrustRevoked -= Server_TrustRevoked;
+            _server.Dispose();
+            _closeReady = true;
+            _closeInProgress = false;
+            _ = Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(Close));
+        }
     }
 
     private static void OpenFolder(string path)

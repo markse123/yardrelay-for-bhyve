@@ -10,9 +10,9 @@ The existing macOS wrapper still supports the development `.env` flow. The Windo
 
 Desktop wrappers start `node server/app.js` with environment variables rather than writing a generated `.env` file into the installed application folder.
 
-Before an existing loopback listener is treated as the controller, the wrapper must call `/api/identity` with a fresh 32-byte base64url challenge and verify the returned HMAC-SHA-256 proof with `APP_TOKEN`. The signed message is `bhyve-local-controller\n1\nidentity\n<challenge>`. A status code, product-name string, redirect, or successful `/api/config` response is not service authentication. Wrappers must not send `APP_TOKEN`, load the embedded UI, or adopt the listener until the proof succeeds.
+Before an existing loopback listener is treated as the controller, the wrapper must call `/api/identity` with a fresh 32-byte base64url challenge and verify the returned HMAC-SHA-256 proof with `APP_TOKEN`. Protocol v2 signs the exact UTF-8 bytes `bhyve-local-controller\n2\nidentity\n<canonical-origin>\n<challenge>`, where the canonical origin is the exact loopback controller origin without a trailing slash, such as `http://127.0.0.1:3030`. A status code, product-name string, redirect, or successful `/api/config` response is not service authentication. Wrappers must not send `APP_TOKEN`, load the embedded UI, or adopt the listener until the proof succeeds.
 
-For native shutdown, wrappers reuse that fresh verified challenge once and send `X-Controller-Challenge` plus a proof over `bhyve-local-controller\n1\nshutdown\n<challenge>`. The server expires challenges after 30 seconds and consumes an accepted challenge. Wrappers must not put `APP_TOKEN` in the shutdown request.
+For native shutdown, wrappers reuse that fresh verified challenge once and send `X-Controller-Challenge` plus a proof over the exact UTF-8 bytes `bhyve-local-controller\n2\nshutdown\n<canonical-origin>\n<challenge>`. The canonical origin must match the verified controller origin. The server expires challenges after 30 seconds and consumes an accepted challenge. Wrappers must not put `APP_TOKEN` in the shutdown request.
 
 After service verification, an embedded browser may receive `APP_TOKEN` in the controller URL fragment. The wrapper must restrict every frame navigation to the exact configured `http://127.0.0.1:<port>` origin, reject redirects to another origin, and suppress new windows. The dashboard removes the fragment immediately after reading it into page memory.
 
@@ -56,12 +56,44 @@ Only one profile is supported in V1. The app is configured when it has an Orbit 
 Windows V1:
 
 - Per-user install under `%LOCALAPPDATA%\Programs\YardRelay` for public builds.
-- Settings, config, data, and logs under `%LOCALAPPDATA%\YardRelay` after the migration phase; private-development builds retain the legacy `%LOCALAPPDATA%\BHyveController` path until migration is implemented and tested.
+- Settings, config, data, and logs under `%LOCALAPPDATA%\YardRelay`, with automatic migration from the legacy `%LOCALAPPDATA%\BHyveController` path as described below.
 - Secrets encrypted for the current user with DPAPI.
 - Node.js 24 or newer required; the setup UI links to https://nodejs.org/en/download.
 - WebView2 Runtime required; the setup UI links to https://developer.microsoft.com/en-us/microsoft-edge/webview2/.
-- Build output is produced by `windows/package-windows.ps1`.
+- Build output is produced by `windows/package-windows.ps1`. Its zip contains a self-contained .NET runtime, but it does not bundle Node.js or WebView2 Runtime.
 - The optional polished installer is defined by `windows/Packaging/BHyveController.iss` and requires Inno Setup 6 on Windows.
+
+### Windows data migration behavior
+
+On startup, `DesktopPaths` applies these rules before opening settings or starting the controller:
+
+1. If `%LOCALAPPDATA%\YardRelay` already exists, use it unchanged. Do not copy, overwrite, or merge anything from the legacy folder.
+2. If the destination is absent and `%LOCALAPPDATA%\BHyveController` exists, copy the legacy folder into a uniquely named staging directory, rewrite only copied settings that equal the exact legacy default paths, and move the completed staging directory to `%LOCALAPPDATA%\YardRelay`. Retain the complete legacy source as a recovery copy.
+3. If neither folder exists, create `%LOCALAPPDATA%\YardRelay` for the new installation.
+4. On every later startup, the existing destination makes migration a no-op. The same startup sequence is therefore idempotent.
+
+The copied exact defaults for `dataDir` and `yardRunConfigPath` are rewritten from the legacy root to the YardRelay root. Any custom path remains unchanged. A failed copy removes its staging directory without deleting or modifying the legacy source, and a retry still refuses to overwrite or merge an existing destination. If both folders exist, the app uses the destination rather than guessing which data to combine. Uninstall must preserve user data unless the user chooses a separate explicit destructive-reset operation.
+
+### Windows install, uninstall, backup, and restore
+
+Published beta instructions must identify the installer as unsigned and direct users to download `YardRelaySetup-<version>.exe` only from the verified GitHub release page. The release must publish a SHA-256 checksum. Users verify it in PowerShell with:
+
+```powershell
+Get-FileHash .\YardRelaySetup-<version>.exe -Algorithm SHA256
+```
+
+The complete result must match the release value before the installer runs. Because the beta is unsigned, Microsoft Defender SmartScreen may display **Windows protected your PC** and **Unknown publisher**. After verifying the release source and checksum, the user may choose **More info** and **Run anyway** for the expected YardRelay installer. Instructions must tell users not to bypass a checksum mismatch or any different warning.
+
+Windows uninstall uses **Settings > Apps > Installed apps > YardRelay > Uninstall**. It removes installed application files but preserves `%LOCALAPPDATA%\YardRelay` by default.
+
+For backup or restore, quit the app and stop its managed controller first:
+
+1. Back up the complete `%LOCALAPPDATA%\YardRelay` folder to private storage.
+2. Restore only while YardRelay is stopped.
+3. Never merge a backup over an existing app-data directory. Rename or move the existing `%LOCALAPPDATA%\YardRelay` folder first, then copy the backup into that exact path.
+4. Treat `secrets.bin` as non-portable. DPAPI binds it to the same Windows user/profile that created it; a different profile or computer must re-enter Orbit credentials.
+
+This is manual local backup/restore, not an encrypted archive feature. Only `secrets.bin` is DPAPI-protected; settings, configuration, data, snapshots, and logs may contain sensitive property or device information in plaintext. Keep backups private and encrypted at rest.
 
 macOS parity target:
 
@@ -95,7 +127,7 @@ If Test Orbit Login fails, the wizard should show the error and still allow Save
 - Port into settings.
 - `WRITE_ACCESS_MODE=protected` into the optional browser-control lock setting.
 
-The app should ignore `HOST` unless it is `127.0.0.1` or `localhost`.
+The app ignores imported `HOST` values and always uses `127.0.0.1`. Keeping one exact IPv4 loopback origin is part of the endpoint-bound service-identity protocol; `localhost` and `::1` are not wrapper-managed aliases.
 
 Yard-run config import is separate. The wrapper should copy the selected file into the app config folder instead of referencing the original source checkout. Missing yard-run config means no optional yard runs are configured. Basic device, zone, and program controls still come from Orbit-discovered state.
 
@@ -112,7 +144,7 @@ Reset Setup should keep yard-run config, snapshots, logs, and active yard-run st
 
 ## Updates
 
-Desktop release links remain disabled until the separate private release repository exists and its destination has been verified. A later manual Check for Updates action may open that release page, but V1 must not silently poll, download, execute, or replace application binaries. True auto-update should wait for a signed release channel, stable update metadata, rollback behavior, and a trust model that both Windows and macOS can enforce.
+Desktop release links remain disabled while this clean-history repository is private and until its public release destination has been verified. A later manual Check for Updates action may open that release page, but V1 must not silently poll, download, execute, or replace application binaries. True auto-update should wait for a signed release channel, stable update metadata, rollback behavior, and a trust model that both Windows and macOS can enforce.
 
 ## Help And User Guide
 

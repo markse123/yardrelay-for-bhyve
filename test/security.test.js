@@ -11,6 +11,7 @@ import {
 } from '../server/orbit-client.js';
 import {
   buildTrustedHosts,
+  buildTrustedOrigins,
   isLoopbackAddress,
   isPathInside,
   isTrustedHostHeader,
@@ -52,11 +53,17 @@ test('loopback Host headers only apply to loopback clients', () => {
 
 test('request origins are checked when browsers send one', () => {
   const trustedHosts = buildTrustedHosts({ host: '127.0.0.1' });
+  const trustedOrigins = buildTrustedOrigins({ trustedHosts, port: 3030 });
 
-  assert.equal(isTrustedOriginHeader(undefined, trustedHosts), true);
-  assert.equal(isTrustedOriginHeader('http://127.0.0.1:3030', trustedHosts), true);
-  assert.equal(isTrustedOriginHeader('http://attacker.example:3030', trustedHosts), false);
-  assert.equal(isTrustedOriginHeader('not a url', trustedHosts), false);
+  assert.equal(isTrustedOriginHeader(undefined, trustedOrigins), true);
+  assert.equal(isTrustedOriginHeader('http://127.0.0.1:3030', trustedOrigins), true);
+  assert.equal(isTrustedOriginHeader('http://localhost:3030', trustedOrigins), true);
+  assert.equal(isTrustedOriginHeader('http://127.0.0.1:3031', trustedOrigins), false);
+  assert.equal(isTrustedOriginHeader('https://127.0.0.1:3030', trustedOrigins), false);
+  assert.equal(isTrustedOriginHeader('http://user@127.0.0.1:3030', trustedOrigins), false);
+  assert.equal(isTrustedOriginHeader('http://127.0.0.1:3030/path', trustedOrigins), false);
+  assert.equal(isTrustedOriginHeader('http://attacker.example:3030', trustedOrigins), false);
+  assert.equal(isTrustedOriginHeader('not a url', trustedOrigins), false);
 });
 
 test('loopback address detection gates local service identity', () => {
@@ -264,6 +271,36 @@ test('watering history requests encode device id and pagination', async () => {
   assert.doesNotMatch(JSON.stringify(logs[0]), /device%2F1|device\/1/);
 });
 
+test('watering history requests honor an external cancellation signal', async () => {
+  const controller = new AbortController();
+  const logs = [];
+  let requestSignal = null;
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'synthetic-password',
+    fetchImpl: async (_url, { signal }) => {
+      requestSignal = signal;
+      return await new Promise(() => {});
+    },
+  });
+  client.apiKey = 'synthetic-api-key';
+  client.token = 'synthetic-api-key';
+  client.on('request-log', (entry) => logs.push(entry));
+
+  const request = client.wateringEvents('synthetic-device', {
+    page: 1,
+    perPage: 10,
+    signal: controller.signal,
+  });
+  controller.abort(new Error('History request cancelled'));
+
+  await assert.rejects(request, /History request cancelled/);
+  assert.equal(requestSignal?.aborted, true);
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].ok, false);
+  assert.match(logs[0].response.error, /History request cancelled/);
+});
+
 test('Orbit requests time out with a sanitized bounded failure log', async () => {
   const logs = [];
   let requestSignal = null;
@@ -372,6 +409,160 @@ test('Orbit log paths preserve numeric diagnostics and redact every other query 
     '/v1/custom?t=123&page=2&hours=4&device=%5Bredacted%5D&note=%5Bredacted%5D',
   );
   assert.doesNotMatch(JSON.stringify(logs[0]), /private-device|private-address/);
+});
+
+test('authenticated Orbit rejections invalidate cached credentials and stop the event stream', async () => {
+  for (const status of [401, 403]) {
+    let streamCloses = 0;
+    const authenticationStates = [];
+    const client = new OrbitClient({
+      email: 'person@example.com',
+      password: 'synthetic-password',
+      fetchImpl: async () => new Response('{"error":"expired"}', { status }),
+    });
+    client.apiKey = 'synthetic-api-key';
+    client.sessionToken = 'synthetic-session-token';
+    client.token = 'synthetic-api-key';
+    client.userId = 'synthetic-user-id';
+    client.wsState = 'running';
+    client.ws = { close: () => { streamCloses += 1; } };
+    client.reconnectTimer = setTimeout(() => {}, 60_000);
+    client.on('authentication-state', (authenticated) => authenticationStates.push(authenticated));
+
+    await assert.rejects(
+      () => client.requestRaw('/v1/devices'),
+      new RegExp(`failed: ${status}`),
+    );
+
+    assert.equal(client.authenticated, false);
+    assert.equal(client.apiKey, null);
+    assert.equal(client.sessionToken, null);
+    assert.equal(client.token, null);
+    assert.equal(client.userId, null);
+    assert.equal(client.subscribedDeviceId, null);
+    assert.equal(client.streamConnected, false);
+    assert.equal(client.reconnectTimer, null);
+    assert.equal(streamCloses, 1);
+    assert.deepEqual(authenticationStates, [false]);
+  }
+});
+
+test('Orbit invalidates authentication before a rejected response body throws', async () => {
+  let streamCloses = 0;
+  const authenticationStates = [];
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'synthetic-password',
+    fetchImpl: async () => ({
+      ok: false,
+      status: 401,
+      async text() {
+        throw new Error('synthetic response body failure');
+      },
+    }),
+  });
+  client.apiKey = 'synthetic-api-key';
+  client.sessionToken = 'synthetic-session-token';
+  client.token = 'synthetic-api-key';
+  client.userId = 'synthetic-user-id';
+  client.wsState = 'running';
+  client.ws = { close: () => { streamCloses += 1; } };
+  client.on('authentication-state', (authenticated) => authenticationStates.push(authenticated));
+
+  await assert.rejects(
+    () => client.requestRaw('/v1/devices'),
+    /synthetic response body failure/,
+  );
+
+  assert.equal(client.authenticated, false);
+  assert.equal(client.apiKey, null);
+  assert.equal(client.sessionToken, null);
+  assert.equal(client.userId, null);
+  assert.equal(client.streamConnected, false);
+  assert.equal(streamCloses, 1);
+  assert.deepEqual(authenticationStates, [false]);
+});
+
+test('Orbit invalidates authentication while a rejected response body never settles', async () => {
+  const controller = new AbortController();
+  let bodyReadStarted = false;
+  let streamCloses = 0;
+  const authenticationStates = [];
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'synthetic-password',
+    fetchImpl: async () => ({
+      ok: false,
+      status: 403,
+      text() {
+        bodyReadStarted = true;
+        return new Promise(() => {});
+      },
+    }),
+  });
+  client.apiKey = 'synthetic-api-key';
+  client.sessionToken = 'synthetic-session-token';
+  client.token = 'synthetic-api-key';
+  client.userId = 'synthetic-user-id';
+  client.wsState = 'running';
+  client.ws = { close: () => { streamCloses += 1; } };
+  client.on('authentication-state', (authenticated) => authenticationStates.push(authenticated));
+
+  const request = client.requestRaw('/v1/devices', { signal: controller.signal });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(bodyReadStarted, true);
+  assert.equal(client.authenticated, false);
+  assert.equal(client.apiKey, null);
+  assert.equal(client.sessionToken, null);
+  assert.equal(client.userId, null);
+  assert.equal(client.streamConnected, false);
+  assert.equal(streamCloses, 1);
+  assert.deepEqual(authenticationStates, [false]);
+
+  controller.abort(new Error('release synthetic hanging response'));
+  await assert.rejects(request, /release synthetic hanging response/);
+  assert.deepEqual(authenticationStates, [false]);
+});
+
+test('a failed login cannot retain credentials from an earlier Orbit session', async () => {
+  const authenticationStates = [];
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'synthetic-password',
+    fetchImpl: async () => new Response('{"error":"not authorized"}', { status: 401 }),
+  });
+  client.apiKey = 'synthetic-api-key';
+  client.sessionToken = 'synthetic-session-token';
+  client.token = 'synthetic-api-key';
+  client.userId = 'synthetic-user-id';
+  client.on('authentication-state', (authenticated) => authenticationStates.push(authenticated));
+
+  await assert.rejects(() => client.login(), /failed: 401/);
+
+  assert.equal(client.authenticated, false);
+  assert.equal(client.apiKey, null);
+  assert.equal(client.sessionToken, null);
+  assert.equal(client.userId, null);
+  assert.deepEqual(authenticationStates, [false]);
+});
+
+test('a successful login publishes the current Orbit authentication state', async () => {
+  const authenticationStates = [];
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'synthetic-password',
+    fetchImpl: async () => new Response(JSON.stringify({
+      orbit_api_key: 'synthetic-api-key',
+      user_id: 'synthetic-user-id',
+    }), { status: 200 }),
+  });
+  client.on('authentication-state', (authenticated) => authenticationStates.push(authenticated));
+
+  await client.login();
+
+  assert.equal(client.authenticated, true);
+  assert.deepEqual(authenticationStates, [true]);
 });
 
 test('Orbit transport errors redact embedded path queries without mangling prose', async () => {
@@ -484,6 +675,21 @@ test('diagnostic log normalization preserves operations while dropping raw priva
   assert.equal(embeddedPath.message, 'Retry? The controller is offline');
   assert.match(embeddedPath.error, /note=%5Bredacted%5D/);
   assert.doesNotMatch(JSON.stringify(embeddedPath), /PrivateResident/);
+});
+
+test('diagnostic log normalization redacts compound credential keys from free-form errors', () => {
+  const normalized = sanitizeDiagnosticLogEntry({
+    id: 'log-compound-credentials',
+    error: 'Orbit rejected access_token=synthetic-access clientSecret=synthetic-secret {\"sessionToken\":\"synthetic-session\"}',
+  });
+
+  assert.doesNotMatch(
+    JSON.stringify(normalized),
+    /synthetic-access|synthetic-secret|synthetic-session/,
+  );
+  assert.match(normalized.error, /access_token=\[redacted\]/);
+  assert.match(normalized.error, /clientSecret=\[redacted\]/);
+  assert.match(normalized.error, /sessionToken\":\[redacted\]/);
 });
 
 test('diagnostic log normalization is JSON-safe and distinguishes absent from null payloads', () => {

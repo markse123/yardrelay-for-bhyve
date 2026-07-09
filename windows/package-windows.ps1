@@ -16,6 +16,7 @@ $PublishDir = Join-Path $OutputRoot "publish/$Runtime"
 $ZipPath = Join-Path $OutputRoot "YardRelay-$Runtime.zip"
 $PackageJson = Get-Content (Join-Path $RepoRoot "package.json") -Raw | ConvertFrom-Json
 $AppVersion = $PackageJson.version
+$InstallerPath = Join-Path $OutputRoot "YardRelaySetup-$AppVersion.exe"
 
 if ($PackageJson.name -ne "yardrelay-for-bhyve" -or $AppVersion -notmatch '^\d+\.\d+\.\d+$') {
     throw "package.json does not contain the expected YardRelay identity and a valid product version."
@@ -92,6 +93,9 @@ if (Test-Path $PublishDir) {
 if (Test-Path $ZipPath) {
     Remove-Item $ZipPath -Force
 }
+if (Test-Path $InstallerPath) {
+    Remove-Item $InstallerPath -Force
+}
 
 $publishArgs = @(
     "publish",
@@ -100,12 +104,60 @@ $publishArgs = @(
     "-r", $Runtime,
     "--self-contained", "true",
     "-p:PublishSingleFile=false",
+    "-p:RestoreLockedMode=true",
+    "-p:YardRelayFailOnNuGetAudit=true",
     "-o", $PublishDir
 )
 
 & $dotnet @publishArgs
 if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish failed with exit code $LASTEXITCODE; packaging stopped."
+}
+
+$dotnetPath = (Resolve-Path $dotnet).Path
+$dotnetRoot = Split-Path $dotnetPath -Parent
+$dotnetLicense = Join-Path $dotnetRoot "LICENSE.txt"
+$dotnetNotices = Join-Path $dotnetRoot "ThirdPartyNotices.txt"
+
+foreach ($requiredSource in @($dotnetLicense, $dotnetNotices)) {
+    if (-not (Test-Path $requiredSource -PathType Leaf)) {
+        throw "Required .NET redistribution notice was not found at $requiredSource; packaging stopped."
+    }
+}
+
+$dotnetLicenseDirectory = Join-Path $PublishDir "licenses/dotnet"
+$protectedDataLicenseDirectory = Join-Path $PublishDir "licenses/System.Security.Cryptography.ProtectedData"
+New-Item -ItemType Directory -Path $dotnetLicenseDirectory -Force | Out-Null
+New-Item -ItemType Directory -Path $protectedDataLicenseDirectory -Force | Out-Null
+Copy-Item -LiteralPath $dotnetLicense -Destination (Join-Path $dotnetLicenseDirectory "LICENSE.txt") -Force
+Copy-Item -LiteralPath $dotnetNotices -Destination (Join-Path $dotnetLicenseDirectory "ThirdPartyNotices.txt") -Force
+Copy-Item -LiteralPath $dotnetLicense -Destination (Join-Path $protectedDataLicenseDirectory "LICENSE.txt") -Force
+
+$requiredPackageFiles = @(
+    "licenses/Microsoft.Web.WebView2/LICENSE.txt",
+    "licenses/Microsoft.Web.WebView2/NOTICE.txt",
+    "licenses/System.Security.Cryptography.ProtectedData/LICENSE.txt",
+    "licenses/System.Security.Cryptography.ProtectedData/THIRD-PARTY-NOTICES.txt",
+    "licenses/dotnet/LICENSE.txt",
+    "licenses/dotnet/ThirdPartyNotices.txt"
+)
+
+foreach ($relativePath in $requiredPackageFiles) {
+    $requiredPath = Join-Path $PublishDir $relativePath
+    if (-not (Test-Path $requiredPath -PathType Leaf)) {
+        throw "Required redistribution notice is missing from the publish tree: $relativePath"
+    }
+}
+
+$symbolFiles = @(Get-ChildItem -LiteralPath $PublishDir -Recurse -File -Filter "*.pdb")
+if ($symbolFiles.Count -gt 0) {
+    $symbolList = ($symbolFiles | ForEach-Object { $_.FullName }) -join ", "
+    throw "Public packages must not contain PDB files. Found: $symbolList"
+}
+
+& $node.Source (Join-Path $RepoRoot "scripts/privacy-scan.js") --directory $PublishDir
+if ($LASTEXITCODE -ne 0) {
+    throw "Published-file privacy scan failed; packaging stopped."
 }
 
 Compress-Archive -Path (Join-Path $PublishDir "*") -DestinationPath $ZipPath -Force
@@ -122,5 +174,8 @@ if ($BuildInstaller) {
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup failed with exit code $LASTEXITCODE; installer creation stopped."
     }
-    Write-Host "Created installer under $OutputRoot"
+    if (-not (Test-Path $InstallerPath -PathType Leaf)) {
+        throw "Inno Setup completed without creating the expected installer at $InstallerPath."
+    }
+    Write-Host "Created $InstallerPath"
 }
