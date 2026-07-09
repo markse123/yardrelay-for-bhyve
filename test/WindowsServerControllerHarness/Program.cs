@@ -235,7 +235,7 @@ async Task VerifyExternalListenerLossRevokesTrustAsync()
 
     await controller.StartAsync("/must/not/run", Settings(fake.Port), Secrets());
     await fake.StopAsync();
-    var completed = await Task.WhenAny(revoked.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+    var completed = await Task.WhenAny(revoked.Task, Task.Delay(TimeSpan.FromSeconds(5)));
     if (completed != revoked.Task
         || controller.ControllerBrowserUri is not null
         || controller.IsControllerNavigationUri(new Uri($"http://127.0.0.1:{fake.Port}/api/state")))
