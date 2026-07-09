@@ -86,6 +86,8 @@ MAX_SSE_BUFFER_BYTES=1048576
 SSE_DRAIN_TIMEOUT_MS=5000
 ```
 
+The shown `APP_TOKEN` is an intentionally rejected placeholder. Replace it before starting YardRelay with 32 random bytes encoded as 64 hexadecimal characters. For example, run `openssl rand -hex 32` and paste the output into `.env`. Explicit unsafe tokens stop server startup; only a completely absent `APP_TOKEN` receives a temporary random token for that one server run.
+
 Set up watering-run recipes if you want named multi-zone controls:
 
 ```bash
@@ -157,7 +159,7 @@ Common behavior:
 - Embedded browsers allow navigation only to the exact configured loopback controller origin and reject popups or redirects elsewhere.
 - Runtime state is stored outside the app bundle by setting `BHYVE_DATA_DIR`.
 - Desktop setup should follow the shared contract in `docs/desktop-setup.md`.
-- Release checks remain disabled while this clean-history repository is private and until its public release destination has been verified. V1 does not silently download, execute, or replace app binaries.
+- The bundled Help guide links to this project's canonical GitHub release page. The page may contain no beta yet. V1 does not silently poll, download, execute, or replace app binaries.
 - Help opens the bundled guide from `public/help/index.html`, including when the local controller server is stopped.
 - Help opens approved download and release links in the system browser instead of navigating the embedded controller view.
 
@@ -180,7 +182,7 @@ swift build
 
 `windows/BHyveControllerApp` contains a WPF/WebView2 wrapper with a first-run setup wizard. It stores non-secret settings under `%LOCALAPPDATA%\YardRelay`, encrypts Orbit credentials for the current Windows user with DPAPI, and starts the Node controller with environment variables instead of writing an installed `.env` file. On first startup after an older installation, it prefers an existing YardRelay folder unchanged. Only when that destination is absent, it makes a staged one-time copy of `%LOCALAPPDATA%\BHyveController`, retains the legacy source, and then uses the new folder. It never merges into or overwrites an existing destination, and later startups are a no-op. Within copied `settings.json`, only the exact legacy default data and yard-run config paths are rewritten; custom paths are preserved.
 
-The wizard checks Node.js and WebView2, lets the user enter Orbit credentials, offers a read-only Test Orbit Login button, generates the local app token, and can import an existing `.env` or yard-run config as a migration shortcut. Its optional browser-control lock selects `WRITE_ACCESS_MODE=protected`; it is off by default for prompt-free loopback controls.
+The wizard checks Node.js and WebView2, lets the user enter Orbit credentials, offers a read-only Test Orbit Login button, generates the local app token, and can import an existing `.env` or yard-run config as a migration shortcut. Imported app tokens must be 32–512 printable ASCII characters, cannot contain leading or trailing whitespace, and cannot contain published sample or generic sentinel values such as placeholders, redactions, or passwords. An unsafe import never replaces an existing safe Windows token; if none exists, YardRelay generates a fresh random 32-byte token while still importing Orbit credentials. If a previously saved token is unsafe, the Windows wrapper reopens setup without using or overwriting the encrypted secrets file; saving setup generates and stores the replacement. Its optional browser-control lock selects `WRITE_ACCESS_MODE=protected`; it is off by default for prompt-free loopback controls.
 
 The Help button is available from both the main toolbar and Desktop setup, so setup and recovery guidance remains available before the controller server starts.
 
@@ -202,7 +204,7 @@ Create the per-user installer on Windows with Inno Setup 6 installed:
 ./windows/package-windows.ps1 -Runtime win-x64 -BuildInstaller
 ```
 
-The package output is written under `outputs/windows/`. The zip is `YardRelay-win-x64.zip`; the installer is `YardRelaySetup-<version>.exe` when `-BuildInstaller` is used. CI validates the Windows package shape without publishing installable artifacts. Version tags that exactly match `package.json` run the separate release workflow, which builds the unsigned installer, scans the final publish tree, generates SHA-256 checksums, an SPDX software bill of materials, and build provenance, and creates a draft prerelease for human inspection. The workflow never publishes the draft automatically; signing and repository visibility remain separate human-controlled gates described in [the public release plan](docs/public-release-plan.md).
+The package output is written under `outputs/windows/`. The zip is `YardRelay-win-x64.zip`; the installer is `YardRelaySetup-<version>.exe` when `-BuildInstaller` is used. CI validates the Windows package shape without publishing installable artifacts. Version tags that exactly match `package.json` run the separate release workflow, which builds the unsigned installer, scans the final publish tree, generates SHA-256 checksums, an SPDX software bill of materials, and build provenance, and creates a draft prerelease for human inspection. The workflow never publishes the draft automatically; publishing remains a separate human-controlled gate described in [the public release plan](docs/public-release-plan.md).
 
 The app expects Node.js 24 or newer and WebView2 Runtime on the target machine; setup links to the official download pages when either prerequisite is missing.
 
@@ -231,7 +233,7 @@ This is a manual local backup/restore procedure, not an encrypted archive featur
 
 ## Development
 
-The command reference below is regenerated from `docs/project-capabilities.json` and current project files. Add user-visible capabilities to that manifest with repository evidence; `npm test` refreshes generated sections before running the test suite, while CI uses `npm run docs:check` to reject uncommitted drift.
+The Features, Requirements, and command-reference sections are generated from `docs/project-capabilities.json` plus the package and wrapper source files named by `scripts/update-project-docs.mjs`. Add user-visible capabilities and commands to the manifest with repository evidence instead of editing generated sections. `package.json` is the product-version source for platform metadata. The `npm test` pretest step runs `metadata:update` and `docs:update`, so contributors review and commit any generated changes with their source change. CI runs `docs:check` and `metadata:check` before tests and rejects drift. There is intentionally no bot that auto-commits generated files.
 
 <!-- BEGIN GENERATED:DEVELOPMENT-COMMANDS -->
 Install dependencies from the lockfile:
@@ -246,13 +248,13 @@ Start the local controller:
 npm start
 ```
 
-Regenerate project documentation and run all checks:
+Regenerate product metadata and project documentation, then run all checks:
 
 ```bash
 npm test
 ```
 
-Regenerate the README and shared Help capability summary without running tests:
+Regenerate the README and shared Help generated sections without running tests:
 
 ```bash
 npm run docs:update

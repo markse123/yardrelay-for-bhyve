@@ -79,7 +79,7 @@ test('desktop setup documents the exact current controller proof bytes', async (
   assert.ok(contract.includes(identityContract), `desktop contract must include ${identityContract}`);
   assert.ok(contract.includes(shutdownContract), `desktop contract must include ${shutdownContract}`);
 
-  const appToken = 'synthetic-doc-contract-token';
+  const appToken = 'synthetic-doc-contract-token-00000001';
   const challenge = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
   const origin = 'http://127.0.0.1:3030';
   for (const purpose of ['identity', 'shutdown']) {
@@ -98,7 +98,7 @@ test('controller identity rejects malformed and non-canonical challenges', () =>
   assert.equal(isValidControllerChallenge(`${'a'.repeat(42)}=`), false);
   assert.throws(
     () => createControllerProof(
-      'synthetic-test-value',
+      'synthetic-test-value-0123456789abcdef',
       'not-a-valid-challenge',
       'identity',
       'http://127.0.0.1:3030',
@@ -107,7 +107,7 @@ test('controller identity rejects malformed and non-canonical challenges', () =>
   );
   assert.throws(
     () => createControllerProof(
-      'synthetic-test-value',
+      'synthetic-test-value-0123456789abcdef',
       crypto.randomBytes(32).toString('base64url'),
       'unknown',
       'http://127.0.0.1:3030',
@@ -116,7 +116,7 @@ test('controller identity rejects malformed and non-canonical challenges', () =>
   );
   assert.throws(
     () => createControllerProof(
-      'synthetic-test-value',
+      'synthetic-test-value-0123456789abcdef',
       crypto.randomBytes(32).toString('base64url'),
       'identity',
       'http://127.0.0.1:3030/',

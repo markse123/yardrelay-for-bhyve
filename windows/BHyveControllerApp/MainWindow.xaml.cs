@@ -22,6 +22,8 @@ public partial class MainWindow : Window
     private DesktopSecrets _secrets;
     private NodeCheck _nodeCheck;
     private string? _importedAppToken;
+    private bool _rejectedUnsafeStoredAppToken;
+    private bool _pendingUnsafeImportTokenReplacement;
     private bool _setupVisible;
     private bool _webViewSecurityConfigured;
     private bool _closeInProgress;
@@ -50,7 +52,9 @@ public partial class MainWindow : Window
         RefreshNodeStatus();
         if (!_settings.IsComplete() || !_secrets.IsComplete())
         {
-            ShowSetup("Complete setup to start the controller.");
+            ShowSetup(_rejectedUnsafeStoredAppToken
+                ? "YardRelay rejected an unsafe saved app token. Before Save, stop watering and physically verify sprinkler state. Saving creates a new token and old signed yard-run recovery becomes unusable."
+                : "Complete setup to start the controller.");
             return;
         }
 
@@ -165,7 +169,12 @@ public partial class MainWindow : Window
     {
         try
         {
-            return _secretStore.LoadOrDefault();
+            var secrets = _secretStore.LoadOrDefault(out _rejectedUnsafeStoredAppToken);
+            if (_rejectedUnsafeStoredAppToken)
+            {
+                _logger.Warn("rejected an unsafe stored app token; setup must generate a replacement");
+            }
+            return secrets;
         }
         catch (Exception error)
         {
@@ -195,10 +204,12 @@ public partial class MainWindow : Window
         _settings.RequireWriteToken = RequireWriteTokenBox.IsChecked == true;
         _secrets.OrbitEmail = EmailBox.Text.Trim();
         _secrets.OrbitPassword = PasswordBox.Password;
-        if (string.IsNullOrWhiteSpace(_secrets.AppToken))
+        if (!AppTokenPolicy.TryNormalize(_secrets.AppToken, out var appToken))
         {
-            _secrets.AppToken = _importedAppToken ?? SecretStore.GenerateAppToken();
+            appToken = AppTokenPolicy.NormalizeOrGenerate(_importedAppToken, out _);
         }
+        _secrets.AppToken = appToken;
+        _importedAppToken = null;
     }
 
     private bool ValidateForm()
@@ -380,15 +391,26 @@ public partial class MainWindow : Window
         {
             PortBox.Text = port;
         }
-        if (values.TryGetValue("APP_TOKEN", out var appToken) && !string.IsNullOrWhiteSpace(appToken))
+        var replacedUnsafeAppToken = false;
+        if (values.TryGetValue("APP_TOKEN", out var appToken))
         {
-            _importedAppToken = appToken;
+            _importedAppToken = AppTokenPolicy.NormalizeOrGenerate(appToken, out replacedUnsafeAppToken);
+        }
+        else
+        {
+            _importedAppToken = AppTokenPolicy.GenerateAppToken();
         }
         if (values.TryGetValue("WRITE_ACCESS_MODE", out var writeAccessMode))
         {
             RequireWriteTokenBox.IsChecked = string.Equals(writeAccessMode, "protected", StringComparison.OrdinalIgnoreCase);
         }
-        SetSetupMessage("Imported .env values. Save setup to store them for this Windows user.");
+        var hasExistingSafeAppToken = AppTokenPolicy.TryNormalize(_secrets.AppToken, out _);
+        _pendingUnsafeImportTokenReplacement = replacedUnsafeAppToken && !hasExistingSafeAppToken;
+        SetSetupMessage(replacedUnsafeAppToken
+            ? hasExistingSafeAppToken
+                ? "Imported .env values. The unsafe APP_TOKEN was ignored; the existing safe token will be retained."
+                : "Imported .env values. The unsafe APP_TOKEN was ignored and a fresh token will be generated. Before Save, stop watering and physically verify sprinkler state because old signed yard-run recovery becomes unusable."
+            : "Imported .env values. Save setup to store them for this Windows user.");
     }
 
     private void ImportYardRunButton_Click(object sender, RoutedEventArgs e)
@@ -436,11 +458,24 @@ public partial class MainWindow : Window
             return;
         }
 
+        if ((_rejectedUnsafeStoredAppToken || _pendingUnsafeImportTokenReplacement)
+            && MessageBox.Show(
+                this,
+                "Saving will replace the app token and make old signed yard-run recovery unusable. Stop watering and physically verify sprinkler state before continuing. Save setup now?",
+                "Confirm app-token replacement",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
         var shouldRestart = _server.IsManagedRunning || _server.ControllerBrowserUri is not null;
         CaptureFormValues();
         _paths.EnsureUserDirectories();
         _settingsStore.Save(_settings);
         _secretStore.Save(_secrets);
+        _rejectedUnsafeStoredAppToken = false;
+        _pendingUnsafeImportTokenReplacement = false;
         _logger.Info("saved desktop setup");
         SetSetupMessage(shouldRestart
             ? "Settings saved. Restarting the controller to apply changes..."
@@ -467,7 +502,7 @@ public partial class MainWindow : Window
     {
         var result = MessageBox.Show(
             this,
-            "Reset settings and secrets for this Windows user? Yard-run config, logs, and runtime data will be kept.",
+            "Reset settings and secrets for this Windows user? This replaces the app token, so old signed yard-run recovery becomes unusable. Stop watering and physically verify sprinkler state before continuing. Yard-run config, logs, and runtime data will be kept.",
             "Reset setup",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning);
@@ -482,6 +517,8 @@ public partial class MainWindow : Window
         _settings = _settingsStore.CreateDefault();
         _secrets = new DesktopSecrets();
         _importedAppToken = null;
+        _rejectedUnsafeStoredAppToken = false;
+        _pendingUnsafeImportTokenReplacement = false;
         ApplySettingsToForm();
         ShowSetup("Setup was reset.");
     }

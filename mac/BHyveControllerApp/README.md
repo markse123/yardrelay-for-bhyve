@@ -4,6 +4,8 @@ Experimental macOS wrapper for YardRelay, an unofficial local controller for Orb
 
 The app is a native SwiftUI shell with a `WKWebView` for the existing local UI. It can start, stop, and restart the YardRelay server on its configured local port. If a controller server is already running in a terminal, the app accepts it only after verifying a fresh HMAC service-identity challenge with the configured `APP_TOKEN`. Native shutdown uses a separate one-time HMAC proof, so the long-lived token is not sent to a newly occupied port. The app does not scan for, trust, or send credentials to unrelated Node processes or arbitrary port owners.
 
+The wrapper accepts an explicit `APP_TOKEN` only when it is 32–512 printable ASCII characters with no surrounding whitespace and is not a sample or generic placeholder. Replace the rejected value from `.env.example`, for example with `openssl rand -hex 32`, before probing or starting the controller. If the token is absent, the wrapper generates a temporary 32-byte random token for its managed server process.
+
 ## Requirements
 
 - macOS 14 or newer
