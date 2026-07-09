@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import test from 'node:test';
+import { gzipSync } from 'node:zlib';
 
 import {
+  DEFAULT_ORBIT_MAX_RESPONSE_BYTES,
   OrbitClient,
   PROGRAM_MUTABLE_KEYS,
   pickProgramMutableFields,
@@ -262,6 +264,7 @@ test('watering history requests encode device id and pagination', async () => {
   await client.wateringEvents('device/1', { page: 3, perPage: 50 });
 
   assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.redirect, 'manual');
   const url = new URL(requests[0].url);
   assert.equal(url.pathname, '/v1/watering_events/device%2F1');
   assert.equal(url.searchParams.get('page'), '3');
@@ -351,9 +354,174 @@ test('Orbit request timeout configuration has a strict upper bound', () => {
   );
 });
 
+test('Orbit response byte limit configuration is bounded and has a safe default', () => {
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+  });
+  assert.equal(client.maxResponseBytes, DEFAULT_ORBIT_MAX_RESPONSE_BYTES);
+  assert.doesNotThrow(() => new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    maxResponseBytes: 64 * 1024 * 1024,
+  }));
+  assert.throws(
+    () => new OrbitClient({
+      email: 'person@example.com',
+      password: 'secret',
+      maxResponseBytes: (64 * 1024 * 1024) + 1,
+    }),
+    /integer from 1 to 67108864/,
+  );
+});
+
+test('Orbit rejects redirects before a login body can be replayed', async () => {
+  const requests = [];
+  const logs = [];
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'synthetic-password',
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return new Response(null, {
+        status: 307,
+        headers: { Location: 'https://redirect-target.invalid/collect' },
+      });
+    },
+  });
+  client.on('request-log', (entry) => logs.push(entry));
+
+  await assert.rejects(
+    () => client.login(),
+    (error) => {
+      assert.equal(error.code, 'ORBIT_UNEXPECTED_REDIRECT');
+      assert.match(error.message, /refused an unexpected redirect/);
+      assert.doesNotMatch(error.message, /redirect-target|person@example|synthetic-password/);
+      return true;
+    },
+  );
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.redirect, 'manual');
+  assert.match(requests[0].options.body, /synthetic-password/);
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].status, 307);
+  assert.equal(logs[0].ok, false);
+  assert.doesNotMatch(JSON.stringify(logs), /redirect-target|person@example|synthetic-password/);
+});
+
+test('Orbit rejects a response URL outside the fixed HTTPS API origin', async () => {
+  const logs = [];
+  const response = new Response('{}', { status: 200 });
+  Object.defineProperty(response, 'url', {
+    configurable: true,
+    value: 'https://unexpected-origin.invalid/v1/devices',
+  });
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    fetchImpl: async () => response,
+  });
+  client.apiKey = 'api-key';
+  client.token = 'api-key';
+  client.on('request-log', (entry) => logs.push(entry));
+
+  await assert.rejects(
+    () => client.requestRaw('/v1/devices'),
+    (error) => {
+      assert.equal(error.code, 'ORBIT_UNEXPECTED_ORIGIN');
+      assert.match(error.message, /unexpected origin/);
+      assert.doesNotMatch(error.message, /unexpected-origin/);
+      return true;
+    },
+  );
+  assert.equal(logs.length, 1);
+  assert.doesNotMatch(JSON.stringify(logs), /unexpected-origin/);
+});
+
+test('Orbit caps the decompressed response stream before parsing JSON', async () => {
+  const maxResponseBytes = 64;
+  const uncompressed = JSON.stringify({ data: 'x'.repeat(1024) });
+  const compressed = gzipSync(uncompressed);
+  assert.ok(compressed.byteLength < maxResponseBytes);
+  assert.ok(Buffer.byteLength(uncompressed) > maxResponseBytes);
+
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    maxResponseBytes,
+    fetchImpl: async () => {
+      const compressedBody = new Response(compressed).body;
+      const decompressedBody = compressedBody.pipeThrough(new DecompressionStream('gzip'));
+      return new Response(decompressedBody, { status: 200 });
+    },
+  });
+  client.apiKey = 'api-key';
+  client.token = 'api-key';
+
+  await assert.rejects(
+    () => client.requestRaw('/v1/devices'),
+    (error) => {
+      assert.equal(error.code, 'ORBIT_RESPONSE_TOO_LARGE');
+      assert.match(error.message, /exceeded the 64-byte safety limit/);
+      assert.doesNotMatch(error.message, /xxxx/);
+      return true;
+    },
+  );
+});
+
+test('Orbit cancels and releases a response reader when the byte cap is crossed', async () => {
+  let reads = 0;
+  let cancellations = 0;
+  let releases = 0;
+  const chunks = [new Uint8Array(4), new Uint8Array(4)];
+  const client = new OrbitClient({
+    email: 'person@example.com',
+    password: 'secret',
+    maxResponseBytes: 6,
+    fetchImpl: async () => ({
+      ok: true,
+      redirected: false,
+      status: 200,
+      url: '',
+      body: {
+        getReader() {
+          return {
+            read() {
+              const value = chunks[reads];
+              reads += 1;
+              return Promise.resolve(value ? { done: false, value } : { done: true });
+            },
+            cancel() {
+              cancellations += 1;
+              return Promise.resolve();
+            },
+            releaseLock() {
+              releases += 1;
+            },
+          };
+        },
+      },
+    }),
+  });
+
+  await assert.rejects(
+    () => client.requestRaw('/v1/devices'),
+    (error) => error?.code === 'ORBIT_RESPONSE_TOO_LARGE',
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(reads, 2);
+  assert.equal(cancellations, 1);
+  assert.ok(releases >= 1);
+});
+
 test('Orbit timeout also bounds a response body that never settles', async () => {
   const logs = [];
   let requestSignal = null;
+  let bodyReadStarted = false;
+  let bodyCancellations = 0;
+  let bodyReleases = 0;
   const client = new OrbitClient({
     email: 'person@example.com',
     password: 'secret',
@@ -362,9 +530,25 @@ test('Orbit timeout also bounds a response body that never settles', async () =>
       requestSignal = signal;
       return {
         ok: true,
+        redirected: false,
         status: 200,
-        async text() {
-          return await new Promise(() => {});
+        url: '',
+        body: {
+          getReader() {
+            return {
+              read() {
+                bodyReadStarted = true;
+                return new Promise(() => {});
+              },
+              cancel() {
+                bodyCancellations += 1;
+                return Promise.resolve();
+              },
+              releaseLock() {
+                bodyReleases += 1;
+              },
+            };
+          },
         },
       };
     },
@@ -379,6 +563,9 @@ test('Orbit timeout also bounds a response body that never settles', async () =>
   );
 
   assert.equal(requestSignal?.aborted, true);
+  assert.equal(bodyReadStarted, true);
+  assert.equal(bodyCancellations, 1);
+  assert.ok(bodyReleases >= 1);
   assert.equal(logs.length, 1);
   assert.equal(logs[0].status, 200);
   assert.equal(logs[0].ok, false);
@@ -455,9 +642,21 @@ test('Orbit invalidates authentication before a rejected response body throws', 
     password: 'synthetic-password',
     fetchImpl: async () => ({
       ok: false,
+      redirected: false,
       status: 401,
-      async text() {
-        throw new Error('synthetic response body failure');
+      url: '',
+      body: {
+        getReader() {
+          return {
+            read() {
+              throw new Error('synthetic response body failure');
+            },
+            cancel() {
+              return Promise.resolve();
+            },
+            releaseLock() {},
+          };
+        },
       },
     }),
   });
@@ -493,10 +692,22 @@ test('Orbit invalidates authentication while a rejected response body never sett
     password: 'synthetic-password',
     fetchImpl: async () => ({
       ok: false,
+      redirected: false,
       status: 403,
-      text() {
-        bodyReadStarted = true;
-        return new Promise(() => {});
+      url: '',
+      body: {
+        getReader() {
+          return {
+            read() {
+              bodyReadStarted = true;
+              return new Promise(() => {});
+            },
+            cancel() {
+              return Promise.resolve();
+            },
+            releaseLock() {},
+          };
+        },
       },
     }),
   });
@@ -596,6 +807,11 @@ test('Orbit transport errors with hostile message getters still emit a safe requ
       throw new Error('raw getter detail');
     },
   });
+  Object.defineProperty(rejectedValue, 'code', {
+    get() {
+      throw new Error('raw code getter detail');
+    },
+  });
   const client = new OrbitClient({
     email: 'person@example.com',
     password: 'secret',
@@ -613,7 +829,7 @@ test('Orbit transport errors with hostile message getters still emit a safe requ
   );
   assert.equal(logs.length, 1);
   assert.equal(logs[0].response.error, 'request failed');
-  assert.doesNotMatch(JSON.stringify(logs[0]), /raw getter detail/);
+  assert.doesNotMatch(JSON.stringify(logs[0]), /raw (?:code )?getter detail/);
 });
 
 test('diagnostic log normalization preserves operations while dropping raw private fields', () => {

@@ -465,7 +465,7 @@ final class ServerController: ObservableObject {
     private var monitorTask: Task<Void, Never>?
 
     var browserURL: URL {
-        AppConfiguration.browserURL(appToken: appToken)
+        AppConfiguration.browserURL(appToken: appToken) ?? controllerURL
     }
 
     init() {
@@ -488,7 +488,12 @@ final class ServerController: ObservableObject {
     }
 
     var canStart: Bool {
-        projectRoot != nil && nodeExecutable != nil && managedProcess == nil && !serverReachable && mode != .starting
+        AppConfiguration.appTokenConfigurationError == nil
+            && projectRoot != nil
+            && nodeExecutable != nil
+            && managedProcess == nil
+            && !serverReachable
+            && mode != .starting
     }
 
     var canStop: Bool {
@@ -499,7 +504,9 @@ final class ServerController: ObservableObject {
     }
 
     var canRestart: Bool {
-        guard projectRoot != nil && nodeExecutable != nil else {
+        guard AppConfiguration.appTokenConfigurationError == nil,
+              projectRoot != nil,
+              nodeExecutable != nil else {
             return false
         }
         return mode != .checking && mode != .starting && mode != .stopping
@@ -517,6 +524,12 @@ final class ServerController: ObservableObject {
     }
 
     func startServer() {
+        guard let safeAppToken = AppConfiguration.normalizedAppToken(appToken) else {
+            mode = .error
+            message = AppConfiguration.appTokenConfigurationError ?? AppConfiguration.appTokenRequirementsMessage
+            return
+        }
+
         guard managedProcess == nil else {
             message = "Server is already managed by this app."
             return
@@ -548,7 +561,7 @@ final class ServerController: ObservableObject {
         var environment = AppConfiguration.sanitizedServerEnvironment(from: ProcessInfo.processInfo.environment)
         environment["HOST"] = "127.0.0.1"
         environment["PORT"] = "\(AppConfiguration.port)"
-        environment["APP_TOKEN"] = appToken
+        environment["APP_TOKEN"] = safeAppToken
         process.environment = environment
 
         let pipe = Pipe()
@@ -684,6 +697,13 @@ final class ServerController: ObservableObject {
     }
 
     private func refreshStatus() async {
+        if let appTokenConfigurationError = AppConfiguration.appTokenConfigurationError {
+            serverReachable = false
+            mode = .error
+            message = appTokenConfigurationError
+            return
+        }
+
         let reachable = await AppConfiguration.isServerReachable(appToken: appToken)
         serverReachable = reachable
 
@@ -750,10 +770,37 @@ private final class RejectControllerRedirects: NSObject, URLSessionTaskDelegate,
 }
 
 enum AppConfiguration {
+    struct AppTokenResolution: Equatable {
+        let token: String?
+        let errorMessage: String?
+        let generated: Bool
+    }
+
+    static let appTokenMinimumLength = 32
+    static let appTokenMaximumLength = 512
+    static let appTokenGeneratedBytes = 32
+    static let appTokenRejectedValues = [
+        "replace-with-a-long-random-local-token",
+    ]
+    static let appTokenRejectedFragments = [
+        "change-me",
+        "changeme",
+        "example-token",
+        "password",
+        "placeholder",
+        "redacted",
+        "replace-with",
+        "sample-token",
+        "your-app-token",
+    ]
+    static let appTokenRequirementsMessage = "APP_TOKEN must be 32 to 512 printable ASCII characters with no surrounding whitespace and cannot use a sample or generic placeholder value. Replace it in local setup or .env with 32 random bytes encoded as 64 hexadecimal characters (for example, run: openssl rand -hex 32)."
+
     static let port = Int(ProcessInfo.processInfo.environment["BHYVE_CONTROLLER_PORT"] ?? "3030") ?? 3030
     static let controllerURL = URL(string: "http://127.0.0.1:\(port)")!
     static let controllerOrigin = canonicalLoopbackOrigin(controllerURL)!
-    static let appToken = resolveAppToken()
+    private static let appTokenResolution = resolveAppToken()
+    static let appToken = appTokenResolution.token ?? ""
+    static let appTokenConfigurationError = appTokenResolution.errorMessage
     static let identityRequestTimeout: TimeInterval = 2
     static let maximumIdentityResponseBytes = 4096
 
@@ -845,7 +892,10 @@ enum AppConfiguration {
         return NSWorkspace.shared.open(candidate)
     }
 
-    static func browserURL(appToken: String) -> URL {
+    static func browserURL(appToken: String) -> URL? {
+        guard let appToken = normalizedAppToken(appToken) else {
+            return nil
+        }
         var components = URLComponents(url: controllerURL, resolvingAgainstBaseURL: false)!
         var tokenComponents = URLComponents()
         tokenComponents.queryItems = [URLQueryItem(name: "token", value: appToken)]
@@ -870,10 +920,16 @@ enum AppConfiguration {
     }
 
     static func isServerReachable(appToken: String = appToken) async -> Bool {
-        await verifiedControllerChallenge(appToken: appToken) != nil
+        guard let appToken = normalizedAppToken(appToken) else {
+            return false
+        }
+        return await verifiedControllerChallenge(appToken: appToken) != nil
     }
 
     private static func verifiedControllerChallenge(appToken: String) async -> String? {
+        guard let appToken = normalizedAppToken(appToken) else {
+            return nil
+        }
         let challenge = randomBytes(count: 32).base64URLEncodedString()
         var components = URLComponents(url: controllerURL.appendingPathComponent("api/identity"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "challenge", value: challenge)]
@@ -959,6 +1015,9 @@ enum AppConfiguration {
     }
 
     static func controllerProof(appToken: String, purpose: String, origin: String, challenge: String) -> String {
+        guard let appToken = normalizedAppToken(appToken) else {
+            return ""
+        }
         let key = SymmetricKey(data: Data(appToken.utf8))
         let code = HMAC<SHA256>.authenticationCode(
             for: controllerProofMessage(purpose: purpose, origin: origin, challenge: challenge),
@@ -990,41 +1049,83 @@ enum AppConfiguration {
         return "http://127.0.0.1\(originPort == 80 ? "" : ":\(originPort)")"
     }
 
-    private static func resolveAppToken() -> String {
-        if let token = ProcessInfo.processInfo.environment["APP_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
-            return token
+    static func normalizedAppToken(_ value: String?) -> String? {
+        guard let value,
+              value.utf8.count >= appTokenMinimumLength,
+              value.utf8.count <= appTokenMaximumLength,
+              value.trimmingCharacters(in: .whitespacesAndNewlines) == value,
+              value.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value <= 0x7e }) else {
+            return nil
         }
 
-        if
-            let projectRoot = resolveProjectRoot(),
-            let contents = try? String(contentsOf: projectRoot.appendingPathComponent(".env"), encoding: .utf8),
-            let token = parseEnvValue(named: "APP_TOKEN", from: contents),
-            !token.isEmpty
-        {
-            return token
+        let lowered = value.lowercased()
+        guard !appTokenRejectedValues.contains(lowered),
+              !appTokenRejectedFragments.contains(where: lowered.contains) else {
+            return nil
+        }
+        return value
+    }
+
+    private static func resolveAppToken() -> AppTokenResolution {
+        let environment = ProcessInfo.processInfo.environment
+        var envContents: String?
+        if environment["APP_TOKEN"] == nil,
+           let projectRoot = resolveProjectRoot() {
+            envContents = try? String(contentsOf: projectRoot.appendingPathComponent(".env"), encoding: .utf8)
+        }
+        return resolveAppToken(
+            environment: environment,
+            envContents: envContents,
+            generateToken: {
+                randomBytes(count: appTokenGeneratedBytes).map { String(format: "%02x", $0) }.joined()
+            })
+    }
+
+    static func resolveAppToken(
+        environment: [String: String],
+        envContents: String?,
+        generateToken: () -> String
+    ) -> AppTokenResolution {
+        if let explicitToken = environment["APP_TOKEN"] {
+            guard let token = normalizedAppToken(explicitToken) else {
+                return AppTokenResolution(token: nil, errorMessage: appTokenRequirementsMessage, generated: false)
+            }
+            return AppTokenResolution(token: token, errorMessage: nil, generated: false)
         }
 
-        return randomBytes(count: 32).map { String(format: "%02x", $0) }.joined()
+        if let envContents,
+           let explicitToken = parseEnvValue(named: "APP_TOKEN", from: envContents) {
+            guard let token = normalizedAppToken(explicitToken) else {
+                return AppTokenResolution(token: nil, errorMessage: appTokenRequirementsMessage, generated: false)
+            }
+            return AppTokenResolution(token: token, errorMessage: nil, generated: false)
+        }
+
+        let generatedToken = generateToken()
+        guard let token = normalizedAppToken(generatedToken) else {
+            return AppTokenResolution(token: nil, errorMessage: "YardRelay could not generate a safe APP_TOKEN.", generated: true)
+        }
+        return AppTokenResolution(token: token, errorMessage: nil, generated: true)
     }
 
     private static func parseEnvValue(named name: String, from contents: String) -> String? {
         for rawLine in contents.components(separatedBy: .newlines) {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty, !line.hasPrefix("#"), let separator = line.firstIndex(of: "=") else {
+            let inspectedLine = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !inspectedLine.isEmpty, !inspectedLine.hasPrefix("#"), let separator = rawLine.firstIndex(of: "=") else {
                 continue
             }
-            let key = line[..<separator].trimmingCharacters(in: .whitespaces)
+            let key = rawLine[..<separator].trimmingCharacters(in: .whitespaces)
             guard key == name else {
                 continue
             }
-            var value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespaces)
+            var value = rawLine[rawLine.index(after: separator)...]
             if value.count >= 2,
                (value.hasPrefix("\"") && value.hasSuffix("\"") || value.hasPrefix("'") && value.hasSuffix("'"))
             {
                 value.removeFirst()
                 value.removeLast()
             }
-            return value
+            return String(value)
         }
         return nil
     }

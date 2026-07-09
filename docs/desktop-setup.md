@@ -31,6 +31,8 @@ YARD_RUN_CONFIG
 
 `.env` remains supported for source checkout and development use. Installed desktop apps should inject secrets and settings into the child process environment at launch.
 
+Every server and wrapper uses the same app-token policy: an explicit `APP_TOKEN` must contain 32–512 printable ASCII characters, have no surrounding whitespace, and must not be the published sample or a generic placeholder, redaction, or password value. The sample in `.env.example` is intentionally invalid and must be replaced, for example with the output of `openssl rand -hex 32`. An explicitly unsafe value fails closed; only an absent value may receive a temporary or wrapper-generated 32-byte CSPRNG token.
+
 `BHYVE_DATA_DIR` points to writable runtime state. The server stores snapshots and yard-run recovery state beneath this folder. `YARD_RUN_CONFIG` points to the optional local yard-run recipe file.
 
 ## Settings Schema
@@ -58,6 +60,7 @@ Windows V1:
 - Per-user install under `%LOCALAPPDATA%\Programs\YardRelay` for public builds.
 - Settings, config, data, and logs under `%LOCALAPPDATA%\YardRelay`, with automatic migration from the legacy `%LOCALAPPDATA%\BHyveController` path as described below.
 - Secrets encrypted for the current user with DPAPI.
+- App tokens are accepted only when they contain 32–512 printable ASCII characters, have no leading or trailing whitespace, and do not contain published sample or generic sentinel values such as placeholders, redactions, or passwords. On startup, a previously stored token that fails this policy is removed from memory before it can be used. The encrypted secrets file is left unchanged, setup reopens with the existing Orbit credentials, and saving setup generates and stores a fresh random 32-byte token.
 - Node.js 24 or newer required; the setup UI links to https://nodejs.org/en/download.
 - WebView2 Runtime required; the setup UI links to https://developer.microsoft.com/en-us/microsoft-edge/webview2/.
 - Build output is produced by `windows/package-windows.ps1`. Its zip contains a self-contained .NET runtime, but it does not bundle Node.js or WebView2 Runtime.
@@ -123,11 +126,15 @@ If Test Orbit Login fails, the wizard should show the error and still allow Save
 `.env` import is a migration shortcut, not the normal storage model. It may import:
 
 - Orbit email and password into native secret storage.
-- App token into native secret storage, or generate one if the file omits it.
+- App token into native secret storage only when it passes the shared token policy above. An unsafe import retains an existing safe Windows token; otherwise Windows generates a fresh random 32-byte token while still importing the Orbit email and password.
 - Port into settings.
 - `WRITE_ACCESS_MODE=protected` into the optional browser-control lock setting.
 
 The app ignores imported `HOST` values and always uses `127.0.0.1`. Keeping one exact IPv4 loopback origin is part of the endpoint-bound service-identity protocol; `localhost` and `::1` are not wrapper-managed aliases.
+
+Replacing an unsafe saved token invalidates any browser copy of the old token. After setup is saved, the verified Windows wrapper receives the new token automatically; a separate browser using protected mode must unlock writes again.
+
+An active yard-run recovery file was signed with the old token and cannot be trusted after replacement. Before saving the replacement, confirm no zone or yard run is active. After the controller restarts, verify the physical sprinkler state; YardRelay may discard recovery state signed by the rejected token rather than replaying it.
 
 Yard-run config import is separate. The wrapper should copy the selected file into the app config folder instead of referencing the original source checkout. Missing yard-run config means no optional yard runs are configured. Basic device, zone, and program controls still come from Orbit-discovered state.
 
@@ -140,11 +147,13 @@ Reset Setup should:
 - Remove native secrets.
 - Restart the setup wizard.
 
+On Windows, Reset Setup requires explicit confirmation that watering is stopped and physically verified. Resetting replaces the app token, so any active or saved yard-run recovery signed with the old token becomes unusable even though the yard-run recipe and runtime files are retained.
+
 Reset Setup should keep yard-run config, snapshots, logs, and active yard-run state. V1 should not include a one-click full app-data delete command; it can expose Open App Data Folder for manual cleanup.
 
 ## Updates
 
-Desktop release links remain disabled while this clean-history repository is private and until its public release destination has been verified. A later manual Check for Updates action may open that release page, but V1 must not silently poll, download, execute, or replace application binaries. True auto-update should wait for a signed release channel, stable update metadata, rollback behavior, and a trust model that both Windows and macOS can enforce.
+The bundled Help guide may link to this project's canonical GitHub release page and open it in the system browser. That page may contain no beta yet. V1 must not silently poll, download, execute, or replace application binaries. True auto-update should wait for a signed release channel, stable update metadata, rollback behavior, and a trust model that both Windows and macOS can enforce.
 
 ## Help And User Guide
 

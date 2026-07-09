@@ -9,6 +9,7 @@
   <ItemGroup>
     <Compile Include="../../windows/BHyveControllerApp/Services/ServerController.cs" Link="Production/ServerController.cs" />
     <Compile Include="../../windows/BHyveControllerApp/Services/ServiceIdentity.cs" Link="Production/ServiceIdentity.cs" />
+    <Compile Include="../../windows/BHyveControllerApp/Services/AppTokenPolicy.cs" Link="Production/AppTokenPolicy.cs" />
     <Compile Include="../../windows/BHyveControllerApp/Services/DesktopLinks.cs" Link="Production/DesktopLinks.cs" />
     <Compile Include="../../windows/BHyveControllerApp/Models/DesktopSettings.cs" Link="Production/DesktopSettings.cs" />
     <Compile Include="../../windows/BHyveControllerApp/Models/DesktopSecrets.cs" Link="Production/DesktopSecrets.cs" />

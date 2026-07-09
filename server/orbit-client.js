@@ -21,6 +21,15 @@ const MAX_RECONNECT_MS = 300_000;
 const START_RECONNECT_MS = 5_000;
 export const DEFAULT_ORBIT_REQUEST_TIMEOUT_MS = 20_000;
 const MAX_ORBIT_REQUEST_TIMEOUT_MS = 120_000;
+export const DEFAULT_ORBIT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+const MAX_ORBIT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+const API_ORIGIN = new URL(API_HOST).origin;
+const SAFE_ORBIT_REQUEST_ERROR_CODES = new Set([
+  'ORBIT_INVALID_RESPONSE_BODY',
+  'ORBIT_RESPONSE_TOO_LARGE',
+  'ORBIT_UNEXPECTED_ORIGIN',
+  'ORBIT_UNEXPECTED_REDIRECT',
+]);
 const SAFE_DIAGNOSTIC_QUERY_KEYS = new Set(['hours', 'page', 'per-page', 't']);
 const DIAGNOSTIC_LOG_FIELDS = [
   'id',
@@ -63,6 +72,7 @@ export class OrbitClient extends EventEmitter {
     fetchImpl = fetch,
     WebSocketImpl = globalThis.WebSocket,
     requestTimeoutMs = DEFAULT_ORBIT_REQUEST_TIMEOUT_MS,
+    maxResponseBytes = DEFAULT_ORBIT_MAX_RESPONSE_BYTES,
   }) {
     super();
     this.email = email;
@@ -70,6 +80,7 @@ export class OrbitClient extends EventEmitter {
     this.fetch = fetchImpl;
     this.WebSocketImpl = WebSocketImpl;
     this.requestTimeoutMs = normalizeRequestTimeout(requestTimeoutMs);
+    this.maxResponseBytes = normalizeMaxResponseBytes(maxResponseBytes);
     this.token = null;
     this.apiKey = null;
     this.sessionToken = null;
@@ -403,6 +414,10 @@ export class OrbitClient extends EventEmitter {
         method,
         headers: this.headers({ authenticated }),
         body: body === undefined ? undefined : JSON.stringify(body),
+        // Orbit requests carry login credentials or session material. Returning
+        // a 3xx response to this client is safe; automatically following it is
+        // not, because fetch can replay bodies and custom headers cross-origin.
+        redirect: 'manual',
         signal: requestSignal,
       }));
       response = await Promise.race([request, timeout.promise, ...externalAbort.promises]);
@@ -412,8 +427,14 @@ export class OrbitClient extends EventEmitter {
       if (authenticated && [401, 403].includes(response.status)) {
         this.invalidateAuthentication();
       }
-      const responseBody = Promise.resolve().then(() => response.text());
-      text = await Promise.race([responseBody, timeout.promise, ...externalAbort.promises]);
+      assertExpectedOrbitResponse(response, { endpoint: safeEndpoint, method });
+      text = await readBoundedResponseText(response, {
+        endpoint: safeEndpoint,
+        externalAbort,
+        maxBytes: this.maxResponseBytes,
+        method,
+        timeout,
+      });
     } catch (error) {
       const timedOut = hasFailureCode(error, 'ORBIT_REQUEST_TIMEOUT');
       const detail = safeFailureDetail(error);
@@ -428,7 +449,7 @@ export class OrbitClient extends EventEmitter {
         request: summarizePayload(body),
         response: { error: detail },
       });
-      if (timedOut) throw error;
+      if (timedOut || isSafeOrbitRequestError(error)) throw error;
       throw new Error(`Orbit ${method} ${safeEndpoint} failed: ${detail}`, { cause: error });
     } finally {
       timeout.cancel();
@@ -585,6 +606,140 @@ function normalizeRequestTimeout(value) {
     throw new TypeError(`requestTimeoutMs must be an integer from 1 to ${MAX_ORBIT_REQUEST_TIMEOUT_MS}`);
   }
   return timeout;
+}
+
+function normalizeMaxResponseBytes(value) {
+  const maxBytes = Number(value);
+  if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_ORBIT_MAX_RESPONSE_BYTES) {
+    throw new TypeError(`maxResponseBytes must be an integer from 1 to ${MAX_ORBIT_MAX_RESPONSE_BYTES}`);
+  }
+  return maxBytes;
+}
+
+function assertExpectedOrbitResponse(response, { endpoint, method }) {
+  const status = Number(response?.status);
+  if (response?.redirected === true || (status >= 300 && status <= 399)) {
+    throw createSafeOrbitRequestError(
+      'ORBIT_UNEXPECTED_REDIRECT',
+      `Orbit ${method} ${endpoint} refused an unexpected redirect; check Orbit service availability and retry`,
+    );
+  }
+
+  const responseUrl = response?.url;
+  if (typeof responseUrl !== 'string' || responseUrl.length === 0) return;
+  let responseOrigin;
+  try {
+    responseOrigin = new URL(responseUrl).origin;
+  } catch {
+    responseOrigin = null;
+  }
+  if (responseOrigin !== API_ORIGIN) {
+    throw createSafeOrbitRequestError(
+      'ORBIT_UNEXPECTED_ORIGIN',
+      `Orbit ${method} ${endpoint} received a response from an unexpected origin`,
+    );
+  }
+}
+
+async function readBoundedResponseText(response, {
+  endpoint,
+  externalAbort,
+  maxBytes,
+  method,
+  timeout,
+}) {
+  const responseBody = response?.body;
+  if (responseBody === null) return '';
+  if (typeof responseBody?.getReader !== 'function') {
+    throw createSafeOrbitRequestError(
+      'ORBIT_INVALID_RESPONSE_BODY',
+      `Orbit ${method} ${endpoint} returned an unreadable response body`,
+    );
+  }
+
+  const reader = responseBody.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  let readerCancelled = false;
+  try {
+    while (true) {
+      const result = await Promise.race([
+        Promise.resolve().then(() => reader.read()),
+        timeout.promise,
+        ...externalAbort.promises,
+      ]);
+      if (result?.done) break;
+      if (!(result?.value instanceof Uint8Array)) {
+        throw createSafeOrbitRequestError(
+          'ORBIT_INVALID_RESPONSE_BODY',
+          `Orbit ${method} ${endpoint} returned an unreadable response body`,
+        );
+      }
+      if (result.value.byteLength > maxBytes - totalBytes) {
+        const error = createSafeOrbitRequestError(
+          'ORBIT_RESPONSE_TOO_LARGE',
+          `Orbit ${method} ${endpoint} response exceeded the ${maxBytes}-byte safety limit`,
+        );
+        readerCancelled = true;
+        void cancelResponseReader(reader);
+        throw error;
+      }
+      chunks.push(result.value);
+      totalBytes += result.value.byteLength;
+    }
+  } catch (error) {
+    if (!readerCancelled) {
+      readerCancelled = true;
+      void cancelResponseReader(reader);
+    }
+    throw error;
+  } finally {
+    releaseResponseReader(reader);
+  }
+
+  if (totalBytes === 0) return '';
+  if (chunks.length === 1) return new TextDecoder().decode(chunks[0]);
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function cancelResponseReader(reader) {
+  try {
+    await reader.cancel(new Error('Orbit response read cancelled'));
+  } catch {
+    // The original request failure is more useful than a secondary stream
+    // cancellation error and does not risk exposing response implementation details.
+  } finally {
+    releaseResponseReader(reader);
+  }
+}
+
+function releaseResponseReader(reader) {
+  try {
+    reader.releaseLock();
+  } catch {
+    // A pending read can temporarily retain the lock. cancelResponseReader()
+    // retries release after cancellation settles.
+  }
+}
+
+function createSafeOrbitRequestError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function isSafeOrbitRequestError(error) {
+  try {
+    return SAFE_ORBIT_REQUEST_ERROR_CODES.has(error?.code);
+  } catch {
+    return false;
+  }
 }
 
 function createRequestTimeout({ endpoint, method, timeoutMs }) {

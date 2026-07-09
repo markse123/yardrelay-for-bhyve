@@ -396,7 +396,7 @@ export async function generateProjectDocs({ rootDirectory = DEFAULT_ROOT_DIRECTO
   const releasesUrl = `${normalizeRepositoryUrl(packageJson.repository)}/releases`;
   const releaseLink = manifest.releaseLinksEnabled
     ? `            <a href="${escapeHtml(releasesUrl)}" target="_blank" rel="noopener noreferrer">Check project releases</a>`
-    : '            <span>Release checks will be enabled after this clean-history repository is public and its release destination is verified.</span>';
+    : '            <span>This build does not include a project-release link.</span>';
   nextHelp = replaceGeneratedSection(
     nextHelp,
     'RELEASE-LINK',

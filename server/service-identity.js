@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import net from 'node:net';
+import { requireSafeAppToken } from '../public/app-token-policy.js';
 
 export const CONTROLLER_SERVICE_NAME = 'bhyve-local-controller';
 export const CONTROLLER_PROTOCOL_VERSION = 2;
@@ -72,9 +73,7 @@ export function controllerOriginFromSocket(socket) {
 }
 
 export function createControllerProof(appToken, challenge, purpose = 'identity', origin) {
-  if (!appToken) {
-    throw new Error('APP_TOKEN is required for controller identity');
-  }
+  const safeAppToken = requireSafeAppToken(appToken);
   if (!isValidControllerChallenge(challenge)) {
     throw new Error('Controller identity challenge is invalid');
   }
@@ -87,7 +86,7 @@ export function createControllerProof(appToken, challenge, purpose = 'identity',
   }
 
   return crypto
-    .createHmac('sha256', String(appToken))
+    .createHmac('sha256', safeAppToken)
     .update(`${PROOF_PREFIX}${purpose}\n${canonicalOrigin}\n${challenge}`, 'utf8')
     .digest('base64url');
 }

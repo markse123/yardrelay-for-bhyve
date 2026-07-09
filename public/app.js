@@ -8,6 +8,10 @@ import {
   normalizeLogEntries,
   sanitizeDiagnosticText,
 } from './diagnostics.js';
+import {
+  APP_TOKEN_REQUIREMENTS_MESSAGE,
+  normalizeAppToken,
+} from './app-token-policy.js';
 
 const MANUAL_RUN_CAP_STORAGE_KEY = 'bhyve.manualRunCapMinutes';
 const DEFAULT_MANUAL_RUN_CAP_MINUTES = 60;
@@ -2274,7 +2278,7 @@ function requireFirstActionData(label, values) {
 async function apiGet(path) {
   const response = await fetch(path, {
     cache: 'no-store',
-    headers: readHeaders(),
+    headers: authenticatedReadHeaders(path),
   });
   return parseResponse(response);
 }
@@ -2282,12 +2286,26 @@ async function apiGet(path) {
 async function loadConfig() {
   const response = await fetch('/api/config', {
     cache: 'no-store',
-    headers: readHeaders(),
+    headers: configReadHeaders(),
   });
   return parseResponse(response);
 }
 
-function readHeaders() {
+// History supports authenticated non-loopback reads; all other background GETs stay tokenless.
+function authenticatedReadHeaders(path) {
+  try {
+    const requestUrl = new URL(path, window.location.href);
+    if (requestUrl.origin === window.location.origin && requestUrl.pathname === '/api/history') {
+      return configReadHeaders();
+    }
+  } catch {
+    // Invalid or non-URL input must fail closed without sending the token.
+  }
+  return {};
+}
+
+// The config capability check uses the token to report whether writes are unlocked.
+function configReadHeaders() {
   return state.appToken ? { 'X-App-Token': state.appToken } : {};
 }
 
@@ -2342,7 +2360,7 @@ async function unlockWriteAccess() {
 
   const token = normalizeAppToken(entered);
   if (!token) {
-    throw new Error('APP_TOKEN must be 16 to 512 characters and cannot contain control characters.');
+    throw new Error(APP_TOKEN_REQUIREMENTS_MESSAGE);
   }
 
   state.appToken = token;
@@ -2378,14 +2396,6 @@ function loadBrowserToken() {
 function clearBrowserToken() {
   state.appToken = '';
   state.writeAccess = false;
-}
-
-function normalizeAppToken(value) {
-  const token = String(value || '').trim();
-  if (token.length < 16 || token.length > 512 || /[\u0000-\u001f\u007f]/.test(token)) {
-    return '';
-  }
-  return token;
 }
 
 function updateWriteAccessUi() {

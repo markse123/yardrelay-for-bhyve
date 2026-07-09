@@ -3,7 +3,34 @@ import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const TEXT_DECODER = new TextDecoder('utf-8', { fatal: false });
+const TEXT_DECODERS = new Map([
+  ['utf-8', new TextDecoder('utf-8', { fatal: true })],
+  ['utf-16le', new TextDecoder('utf-16le', { fatal: true })],
+  ['utf-16be', new TextDecoder('utf-16be', { fatal: true })],
+]);
+
+const ALLOWED_ENV_SAMPLE_VALUES = new Map([
+  ['ORBIT_EMAIL', 'you@example.com'],
+  ['ORBIT_PASSWORD', 'your-orbit-password'],
+  ['APP_TOKEN', 'replace-with-a-long-random-local-token'],
+]);
+
+const TEXT_FILE_EXTENSIONS = new Set([
+  '.c', '.cc', '.cfg', '.conf', '.cpp', '.cs', '.csproj', '.css', '.csv', '.env',
+  '.h', '.hpp', '.html', '.ini', '.iss', '.java', '.js', '.json', '.jsx', '.lock',
+  '.md', '.mjs', '.plist', '.props', '.ps1', '.py', '.rb', '.rs', '.sh', '.sln',
+  '.swift', '.targets', '.toml', '.ts', '.tsx', '.txt', '.xaml', '.xml', '.yaml', '.yml',
+]);
+
+const TEXT_FILE_NAMES = new Set([
+  '.editorconfig', '.gitattributes', '.gitignore', 'dockerfile', 'license', 'makefile',
+  'notice',
+]);
+
+const UNSCANNABLE_TEXT_RULE = {
+  id: 'unscannable-text-file',
+  message: 'Text-like file could not be decoded safely for privacy scanning.',
+};
 
 const FORBIDDEN_TRACKED_PATHS = [
   {
@@ -76,7 +103,12 @@ const LINE_RULES = [
   },
   {
     id: 'real-orbit-env-value',
-    pattern: /^(?:\s*(?:ORBIT_EMAIL|ORBIT_PASSWORD|APP_TOKEN)\s*=\s*)(?!you@example\.com\b|your-orbit-password\b|replace-with-a-long-random-local-token\b|example\b|placeholder\b|redacted\b|\[redacted\]\b).+/i,
+    matches: (line) => {
+      const match = /^\s*(ORBIT_EMAIL|ORBIT_PASSWORD|APP_TOKEN)\s*=\s*(.*?)\s*$/i.exec(line);
+      if (!match || !match[2]) return false;
+      const allowedValue = ALLOWED_ENV_SAMPLE_VALUES.get(match[1].toUpperCase());
+      return match[2] !== allowedValue;
+    },
     message: 'Real-looking Orbit credential or app token value detected.',
   },
   {
@@ -134,8 +166,92 @@ function directoryFiles(rootDirectory, currentDirectory = rootDirectory) {
   return files.sort();
 }
 
-function isProbablyText(buffer) {
-  return !buffer.includes(0);
+function decodeScannableText(relativePath, buffer) {
+  const textLikePath = isTextLikePath(relativePath);
+  const bomEncoding = detectBomEncoding(buffer);
+  if (bomEncoding) {
+    const decoded = decodeText(buffer, bomEncoding);
+    if (decoded) return decoded;
+    return textLikePath ? decodingFailure() : null;
+  }
+
+  if (buffer.includes(0)) {
+    const inferredEncoding = inferUtf16Encoding(buffer);
+    if (inferredEncoding) {
+      const decoded = decodeText(buffer, inferredEncoding);
+      if (decoded) return decoded;
+    }
+
+    // NUL-bearing source text must never silently bypass the privacy gate.
+    return textLikePath ? decodingFailure() : null;
+  }
+
+  const decoded = decodeText(buffer, 'utf-8');
+  if (decoded) return decoded;
+  return textLikePath ? decodingFailure() : null;
+}
+
+function detectBomEncoding(buffer) {
+  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+    return 'utf-8';
+  }
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return 'utf-16le';
+  }
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    return 'utf-16be';
+  }
+  return null;
+}
+
+function inferUtf16Encoding(buffer) {
+  if (buffer.length < 8 || buffer.length % 2 !== 0) return null;
+
+  const sampledLength = Math.min(buffer.length, 8192);
+  const pairs = Math.floor(sampledLength / 2);
+  let evenNuls = 0;
+  let oddNuls = 0;
+  for (let index = 0; index < pairs * 2; index += 2) {
+    if (buffer[index] === 0) evenNuls += 1;
+    if (buffer[index + 1] === 0) oddNuls += 1;
+  }
+
+  const evenRatio = evenNuls / pairs;
+  const oddRatio = oddNuls / pairs;
+  if (oddRatio >= 0.3 && evenRatio <= 0.05) return 'utf-16le';
+  if (evenRatio >= 0.3 && oddRatio <= 0.05) return 'utf-16be';
+  return null;
+}
+
+function decodeText(buffer, encoding) {
+  try {
+    const text = TEXT_DECODERS.get(encoding).decode(buffer);
+    return isSensibleText(text) ? { text } : null;
+  } catch {
+    return null;
+  }
+}
+
+function isSensibleText(text) {
+  for (const character of text) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint === 0xfffd || codePoint === 0x00) return false;
+    if (codePoint < 0x20 && ![0x09, 0x0a, 0x0c, 0x0d].includes(codePoint)) return false;
+    if (codePoint >= 0x7f && codePoint <= 0x9f) return false;
+  }
+  return true;
+}
+
+function isTextLikePath(relativePath) {
+  const normalizedPath = String(relativePath).replaceAll('\\', '/');
+  const baseName = path.posix.basename(normalizedPath).toLowerCase();
+  return baseName.startsWith('.env')
+    || TEXT_FILE_NAMES.has(baseName)
+    || TEXT_FILE_EXTENSIONS.has(path.posix.extname(baseName));
+}
+
+function decodingFailure() {
+  return { error: true };
 }
 
 function finding(path, line, rule) {
@@ -156,11 +272,11 @@ export function findForbiddenPath(path) {
 
 export function scanText(path, text) {
   const findings = [];
-  const lines = text.split(/\r?\n/);
+  const lines = text.split(/\r\n|\r|\n/);
 
   for (const [index, line] of lines.entries()) {
     for (const rule of LINE_RULES) {
-      if (rule.pattern.test(line)) {
+      if (rule.matches ? rule.matches(line) : rule.pattern.test(line)) {
         findings.push(finding(path, index + 1, rule));
       }
     }
@@ -185,13 +301,15 @@ export function scanTrackedFiles(paths, { rootDirectory = process.cwd() } = {}) 
     const filePath = path.isAbsolute(relativePath)
       ? relativePath
       : path.join(resolvedRoot, relativePath);
-    const buffer = readFileSync(filePath);
-    if (!isProbablyText(buffer)) {
+    const decoded = decodeScannableText(relativePath, readFileSync(filePath));
+    if (!decoded) continue;
+    if (decoded.error) {
+      findings.push(finding(relativePath, 1, UNSCANNABLE_TEXT_RULE));
       continue;
     }
 
     scannedTextFiles += 1;
-    findings.push(...scanText(relativePath, TEXT_DECODER.decode(buffer)));
+    findings.push(...scanText(relativePath, decoded.text));
   }
 
   return {

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { findForbiddenPath, scanText } from '../scripts/privacy-scan.js';
+import { findForbiddenPath, scanDirectory, scanText } from '../scripts/privacy-scan.js';
 
 test('privacy scan allows documented placeholder environment values', () => {
   const findings = scanText(
@@ -18,6 +18,83 @@ test('privacy scan allows documented placeholder environment values', () => {
   );
 
   assert.deepEqual(findings, []);
+});
+
+test('privacy scan requires complete key-specific sample values', () => {
+  const findings = scanText(
+    '.env.example',
+    [
+      'ORBIT_EMAIL=you@example.com.invalid',
+      'ORBIT_PASSWORD=your-orbit-password-real-secret',
+      'APP_TOKEN=replace-with-a-long-random-local-token-real-secret',
+      'ORBIT_PASSWORD=placeholder-real-secret',
+      'ORBIT_PASSWORD=you@example.com',
+    ].join('\n'),
+  );
+
+  assert.deepEqual(
+    findings.map((item) => item.rule),
+    Array(5).fill('real-orbit-env-value'),
+  );
+});
+
+test('privacy scan recognizes LF, CRLF, and bare CR line endings', () => {
+  for (const lineEnding of ['\n', '\r\n', '\r']) {
+    const findings = scanText(
+      'fixture.txt',
+      `first line${lineEnding}ORBIT_PASSWORD=synthetic-private-value${lineEnding}last line`,
+    );
+
+    assert.deepEqual(
+      findings.map(({ line, rule }) => ({ line, rule })),
+      [{ line: 2, rule: 'real-orbit-env-value' }],
+    );
+  }
+});
+
+test('privacy scan decodes BOM-marked and inferred UTF-16 text', async (t) => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'yardrelay encoded privacy '));
+  t.after(() => rm(temporaryRoot, { recursive: true, force: true }));
+  const secretLine = 'ORBIT_PASSWORD=synthetic-private-value\n';
+  const cases = [
+    ['utf-16le-bom', encodeUtf16Le(secretLine, { bom: true })],
+    ['utf-16be-bom', encodeUtf16Be(secretLine, { bom: true })],
+    ['utf-16le-inferred', encodeUtf16Le(secretLine)],
+    ['utf-16be-inferred', encodeUtf16Be(secretLine)],
+  ];
+
+  for (const [name, content] of cases) {
+    await t.test(name, async () => {
+      const caseRoot = path.join(temporaryRoot, name);
+      await mkdir(caseRoot, { recursive: true });
+      await writeFile(path.join(caseRoot, 'SECURITY.md'), content);
+
+      const result = scanDirectory(caseRoot);
+      assert.equal(result.scannedTextFiles, 1);
+      assert.deepEqual(result.findings.map((item) => item.rule), ['real-orbit-env-value']);
+    });
+  }
+});
+
+test('privacy scan fails closed for ambiguous text while skipping binary assets', async (t) => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'yardrelay binary privacy '));
+  t.after(() => rm(temporaryRoot, { recursive: true, force: true }));
+
+  const malformedTextRoot = path.join(temporaryRoot, 'malformed-text');
+  await mkdir(malformedTextRoot, { recursive: true });
+  await writeFile(path.join(malformedTextRoot, 'README.md'), Buffer.from([0, 1, 2, 3, 0, 4, 5, 6]));
+  const malformedText = scanDirectory(malformedTextRoot);
+  assert.deepEqual(malformedText.findings.map((item) => item.rule), ['unscannable-text-file']);
+
+  const binaryRoot = path.join(temporaryRoot, 'binary');
+  await mkdir(binaryRoot, { recursive: true });
+  await writeFile(
+    path.join(binaryRoot, 'asset.png'),
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1, 2, 3]),
+  );
+  const binary = scanDirectory(binaryRoot);
+  assert.equal(binary.scannedTextFiles, 0);
+  assert.deepEqual(binary.findings, []);
 });
 
 test('privacy scan rejects tracked local-only paths', () => {
@@ -102,6 +179,19 @@ test('privacy scan CLI runs from a repository path containing spaces and rejects
   assert.equal(passed.status, 0, passed.stderr);
   assert.match(passed.stdout, /Privacy scan passed:/);
 
+  const encodedSourcePath = path.join(repositoryRoot, 'SECURITY.md');
+  await writeFile(
+    encodedSourcePath,
+    encodeUtf16Le('ORBIT_PASSWORD=synthetic-private-value\n'),
+  );
+  const encodedSource = spawnSync(process.execPath, [scriptPath], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+  });
+  assert.equal(encodedSource.status, 1, encodedSource.stdout);
+  assert.match(encodedSource.stderr, /SECURITY\.md:1 real-orbit-env-value/);
+  await rm(encodedSourcePath);
+
   await mkdir(path.join(repositoryRoot, 'config'), { recursive: true });
   await writeFile(path.join(repositoryRoot, 'config', 'yard-runs.local.json'), '{}\n');
 
@@ -127,6 +217,18 @@ test('privacy scan CLI can scan an explicit package directory outside a Git work
   assert.equal(passed.status, 0, passed.stderr);
   assert.match(passed.stdout, /from 1 package directory file\(s\)/);
 
+  const encodedPackagePath = path.join(packageRoot, 'SECURITY.md');
+  await writeFile(
+    encodedPackagePath,
+    encodeUtf16Be('ORBIT_PASSWORD=synthetic-secret-value\n', { bom: true }),
+  );
+  const encodedPackage = spawnSync(process.execPath, [scriptPath, '--directory', packageRoot], {
+    encoding: 'utf8',
+  });
+  assert.equal(encodedPackage.status, 1, encodedPackage.stdout);
+  assert.match(encodedPackage.stderr, /SECURITY\.md:1 real-orbit-env-value/);
+  await rm(encodedPackagePath);
+
   await writeFile(path.join(packageRoot, 'config', '.env.production'), 'ORBIT_PASSWORD=synthetic-secret-value\n');
   const failed = spawnSync(process.execPath, [scriptPath, '--directory', packageRoot], {
     encoding: 'utf8',
@@ -134,3 +236,18 @@ test('privacy scan CLI can scan an explicit package directory outside a Git work
   assert.equal(failed.status, 1, failed.stdout);
   assert.match(failed.stderr, /config\/\.env\.production:1 tracked-env-file/);
 });
+
+function encodeUtf16Le(text, { bom = false } = {}) {
+  const content = Buffer.from(text, 'utf16le');
+  return bom ? Buffer.concat([Buffer.from([0xff, 0xfe]), content]) : content;
+}
+
+function encodeUtf16Be(text, { bom = false } = {}) {
+  const littleEndian = Buffer.from(text, 'utf16le');
+  const content = Buffer.alloc(littleEndian.length);
+  for (let index = 0; index < littleEndian.length; index += 2) {
+    content[index] = littleEndian[index + 1];
+    content[index + 1] = littleEndian[index];
+  }
+  return bom ? Buffer.concat([Buffer.from([0xfe, 0xff]), content]) : content;
+}
