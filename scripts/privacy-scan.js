@@ -104,7 +104,7 @@ const LINE_RULES = [
   {
     id: 'real-orbit-env-value',
     matches: (line) => {
-      const match = /^\s*(ORBIT_EMAIL|ORBIT_PASSWORD|APP_TOKEN)\s*=\s*(.*?)\s*$/i.exec(line);
+      const match = /^\s*(?:export\s+)?(ORBIT_EMAIL|ORBIT_PASSWORD|APP_TOKEN)\s*=\s*(.*?)\s*$/i.exec(line);
       if (!match || !match[2]) return false;
       const allowedValue = ALLOWED_ENV_SAMPLE_VALUES.get(match[1].toUpperCase());
       return match[2] !== allowedValue;
