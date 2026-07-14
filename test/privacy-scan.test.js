@@ -38,6 +38,21 @@ test('privacy scan requires complete key-specific sample values', () => {
   );
 });
 
+test('privacy scan flags export-prefixed credential assignments', () => {
+  const findings = scanText(
+    'setup.sh',
+    [
+      'export ORBIT_PASSWORD=not-a-placeholder-value',
+      '  export APP_TOKEN=real-secret-value',
+    ].join('\n'),
+  );
+
+  assert.deepEqual(
+    findings.map((item) => item.rule),
+    ['real-orbit-env-value', 'real-orbit-env-value'],
+  );
+});
+
 test('privacy scan recognizes LF, CRLF, and bare CR line endings', () => {
   for (const lineEnding of ['\n', '\r\n', '\r']) {
     const findings = scanText(
