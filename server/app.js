@@ -193,6 +193,10 @@ if (state.status.configured) {
   });
   wireOrbit(orbit);
   connectOrbit().catch((error) => logError('Orbit startup failed', error));
+  // Arm the periodic refresh even if the initial connection fails, so the
+  // controller self-heals (retries login and resumes a recovered yard run) once
+  // Orbit becomes reachable again, instead of never scheduling a refresh at all.
+  scheduleRefreshLoop();
 } else {
   addEvent('warn', 'Missing ORBIT_EMAIL or ORBIT_PASSWORD; UI will run disconnected');
 }
@@ -242,6 +246,7 @@ server.listen(PORT, HOST, () => {
   }
   if (appTokenResolution.generated) {
     console.log('APP_TOKEN was not set; generated a temporary token for this server run.');
+    console.warn('Because APP_TOKEN was auto-generated, an interrupted yard run cannot be recovered after a restart: its saved state is signed with this run\'s token and will be discarded next start. Set a persistent APP_TOKEN in .env to enable cross-restart recovery.');
   }
 });
 
@@ -288,10 +293,12 @@ async function route(req, res) {
   }
 
   if (url.pathname === '/api/state' && req.method === 'GET') {
+    requireTrustedBrowserRead(req);
     return sendJson(res, 200, currentState());
   }
 
   if (url.pathname === '/api/logs' && req.method === 'GET') {
+    requireTrustedBrowserRead(req);
     return sendJson(res, 200, { logs: recentLogs });
   }
 
@@ -630,10 +637,14 @@ async function performRefreshState({ forceLogin = false } = {}) {
   await resumeRecoveredYardRun();
   state.yardRun = describeYardRun();
   broadcastState();
+  scheduleRefreshLoop();
+  return currentState();
+}
+
+function scheduleRefreshLoop() {
   refreshTimer = ensureScheduledRefresh(refreshTimer, () => setInterval(() => {
     refreshState({ force: true }).catch((error) => logError('Scheduled refresh failed', error));
   }, REFRESH_MS));
-  return currentState();
 }
 
 function startOrAppendYardRun(runKey, { minutes }) {
@@ -651,6 +662,11 @@ function startOrAppendYardRun(runKey, { minutes }) {
       throw newHttpError(409, 'Watering is already active on another zone');
     }
     yardRun = createActiveYardRun();
+    // A brand-new run is not a recovered run. Clear any pending recovery flag so
+    // a later refresh cannot mistake this live run for restored state and reset
+    // its timer.
+    yardRunNeedsRecovery = false;
+    yardRunRecoveryClaim = null;
   }
 
   addWateringRun(runKey);
@@ -700,6 +716,9 @@ async function performStopYardRun() {
     clearWateringStatus: clearYardStepWateringStatus,
   });
   yardRun = result.yardRun;
+  // The stop already acknowledged/cleared any recovery claim; clear the flag too
+  // so a subsequent fresh run is not later treated as recovered state.
+  yardRunNeedsRecovery = false;
   addEvent(
     'action',
     result.stoppedStep
@@ -768,15 +787,22 @@ function completeCurrentYardStep() {
     return;
   }
 
+  // The zone's run time has elapsed, so record the step complete and advance the
+  // queue even if the stop command cannot be delivered right now. A failed stop
+  // (for example, the Orbit event stream is momentarily down) must not wedge the
+  // whole run: the zone was started with an Orbit-side run_time and stops on its
+  // own, and the next scheduled refresh reconciles device state.
+  let stopError = null;
   try {
     stopYardStep(completedStep);
   } catch (error) {
+    stopError = error;
     logError('Failed to stop a configured yard-run zone', error);
-    return;
   }
   yardRun.completedSteps.push({
     ...completedStep,
     completedAt: new Date().toISOString(),
+    ...(stopError ? { error: stopError.message } : {}),
   });
   yardRun.currentStep = null;
   yardRun.updatedAt = new Date().toISOString();
@@ -865,6 +891,12 @@ async function resumeRecoveredYardRun() {
     }
   }
 
+  if (!Array.isArray(state.devices) || state.devices.length === 0) {
+    // A transient empty device list (for example, a 200 response before the
+    // account's devices are available) must not permanently discard the recovered
+    // queue. Keep the claim and retry reconciliation on the next refresh.
+    return;
+  }
   clearTimeout(yardRunTimer);
   yardRunTimer = null;
   const reconciled = reconcileYardRunStateDevices(yardRun, state.devices);
@@ -2127,7 +2159,12 @@ function sleep(ms) {
 
 function matchPath(pathname, regex) {
   const match = regex.exec(pathname);
-  return match ? match.slice(1).map(decodeURIComponent) : null;
+  if (!match) return null;
+  try {
+    return match.slice(1).map(decodeURIComponent);
+  } catch {
+    throw newHttpError(400, 'Invalid percent-encoding in request path');
+  }
 }
 
 function contentType(filePath) {
